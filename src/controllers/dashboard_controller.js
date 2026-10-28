@@ -27,39 +27,8 @@ const getDashboardStats = async (req, res) => {
         $group: {
           _id: null,
           total: { $sum: 1 },
-          dinero: {
-            $sum: { $cond: [{ $eq: ["$tipo", "dinero"] }, 1, 0] },
-          },
           fisica: {
             $sum: { $cond: [{ $eq: ["$tipo", "fisica"] }, 1, 0] },
-          },
-          dineroPagado: {
-            $sum: {
-              $cond: [
-                {
-                  $and: [
-                    { $eq: ["$tipo", "dinero"] },
-                    { $eq: ["$estado", "pagado"] },
-                  ],
-                },
-                "$monto",
-                0,
-              ],
-            },
-          },
-          dineroPendiente: {
-            $sum: {
-              $cond: [
-                {
-                  $and: [
-                    { $eq: ["$tipo", "dinero"] },
-                    { $eq: ["$estado", "pendiente"] },
-                  ],
-                },
-                "$monto",
-                0,
-              ],
-            },
           },
         },
       },
@@ -83,9 +52,6 @@ const getDashboardStats = async (req, res) => {
             $dateToString: { format: "%Y-%m", date: "$createdAt" },
           },
           total: { $sum: 1 },
-          dinero: {
-            $sum: { $cond: [{ $eq: ["$tipo", "dinero"] }, 1, 0] },
-          },
           fisica: {
             $sum: { $cond: [{ $eq: ["$tipo", "fisica"] }, 1, 0] },
           },
@@ -103,15 +69,11 @@ const getDashboardStats = async (req, res) => {
 
     const totals = totalsAgg[0] || {
       total: 0,
-      dinero: 0,
       fisica: 0,
-      dineroPagado: 0,
-      dineroPendiente: 0,
     };
 
     const estado = {
       pendiente: 0,
-      pagado: 0,
       asignada: 0,
       entregada: 0,
       cancelada: 0,
@@ -120,7 +82,7 @@ const getDashboardStats = async (req, res) => {
       if (item?._id) estado[item._id] = item.total;
     });
 
-    const tipo = { dinero: 0, fisica: 0 };
+    const tipo = { fisica: 0 };
     tipoAgg.forEach((item) => {
       if (item?._id) tipo[item._id] = item.total;
     });
@@ -128,7 +90,6 @@ const getDashboardStats = async (req, res) => {
     const porMes = porMesAgg.map((item) => ({
       mes: item._id,
       total: item.total,
-      dinero: item.dinero,
       fisica: item.fisica,
     }));
 

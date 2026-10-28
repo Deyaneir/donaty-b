@@ -4,19 +4,112 @@ import Admin from "../models/Admin.js";
 import Recolector from "../models/Recolector.js";
 import {
   sendMailToRecoveryPassword,
+  sendMailToRecoveryPasswordMobile,
   sendMailToRegister,
+  sendMailToRegisterMobile,
 } from "../helpers/sendMail.js";
-import { crearTokenJWT } from "../middlewares/JWT.js";
+import { sendMailToAdminRequest } from "../config/nodemailer.js";
+import {
+  crearTokenJWT,
+  crearRefreshToken,
+  verificarRefreshToken,
+} from "../middlewares/JWT.js";
 import { isBlank, requireFields } from "../utils/validation.js";
+
+const RECOVERY_TOKEN_MINUTES = 60;
 
 const isValidToken = (token = "") =>
   typeof token === "string" && token.trim().length === 32;
 const isEpnEmail = (email = "") =>
   String(email).trim().toLowerCase().endsWith("@epn.edu.ec");
+const isTokenExpired = (doc) =>
+  Boolean(doc?.tokenExpires && doc.tokenExpires < new Date());
+const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const reenviarConfirmacion = async (req, res) => {
+  try {
+    const { email, origen } = req.body || {};
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    if (!emailPattern.test(normalizedEmail)) {
+      return res.status(400).json({ msg: "Debes ingresar un correo válido" });
+    }
+
+    const cuentas = await Promise.all([
+      Donante.findOne({ email: normalizedEmail }),
+      Recolector.findOne({ email: normalizedEmail }),
+      Admin.findOne({ email: normalizedEmail }),
+    ]);
+    const cuenta = cuentas.find((item) => item && !item.confirmEmail);
+    if (!cuenta) {
+      return res.status(200).json({
+        msg: "Si existe una cuenta pendiente con ese correo, enviaremos un enlace de confirmación",
+      });
+    }
+
+    const token = cuenta.createToken();
+    cuenta.token = token;
+    await cuenta.save();
+
+    const sendRegistrationEmail = origen === "movil"
+      ? sendMailToRegisterMobile
+      : sendMailToRegister;
+    await sendRegistrationEmail(normalizedEmail, token);
+
+    return res.status(200).json({
+      msg: "Si existe una cuenta pendiente con ese correo, enviaremos un enlace de confirmación",
+    });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ msg: "No se pudo enviar el correo de confirmación" });
+  }
+};
+
+const solicitarContactoAdmin = async (req, res) => {
+  try {
+    const { nombre, email, mensaje } = req.body || {};
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    const nombreLimpio = String(nombre || "").trim();
+    const mensajeLimpio = String(mensaje || "").trim();
+
+    if (!nombreLimpio || nombreLimpio.length > 120 ||
+        !emailPattern.test(normalizedEmail) ||
+        !mensajeLimpio || mensajeLimpio.length > 5000) {
+      return res.status(400).json({
+        msg: "Indica un nombre, correo válido y mensaje (máximo 5000 caracteres)",
+      });
+    }
+
+    const admin = process.env.ADMIN_CONTACT_EMAIL
+      ? null
+      : await Admin.findOne({ status: true }).sort({ createdAt: 1 });
+    const recipient = process.env.ADMIN_CONTACT_EMAIL || admin?.email;
+    if (!recipient) {
+      return res.status(503).json({ msg: "El contacto con administración no está configurado" });
+    }
+
+    await sendMailToAdminRequest(
+      { nombre: nombreLimpio, email: normalizedEmail, mensaje: mensajeLimpio },
+      recipient
+    );
+    return res.status(200).json({ msg: "Tu solicitud fue enviada al administrador" });
+  } catch (error) {
+    console.error(error);
+    return res.status(503).json({ msg: "No se pudo enviar tu solicitud al administrador" });
+  }
+};
+
+// La recuperación de contraseña desde la app sirve para donantes y recolectores.
+const findResetAccountByEmail = async (email) =>
+  (await Donante.findOne({ email })) || (await Recolector.findOne({ email }));
+
+const findResetAccountByToken = async (token) =>
+  (await Donante.findOne({ token })) || (await Recolector.findOne({ token }));
 
 const registro = async (req, res) => {
   try {
-    const { nombre, apellido, direccion, telefono, email, password } = req.body || {};
+    const { nombre, apellido, direccion, telefono, email, password, origen } =
+      req.body || {};
+    const esMovil = origen === "movil";
     const faltantes = requireFields(req.body, [
       "nombre",
       "apellido",
@@ -66,7 +159,11 @@ const registro = async (req, res) => {
     nuevoDonante.token = token;
     nuevoDonante.confirmEmail = false;
 
-    await sendMailToRegister(normalizedEmail, token);
+    // Web: correo de siempre. App móvil: correo con enlace a la página puente.
+    const enviarCorreoRegistro = esMovil
+      ? sendMailToRegisterMobile
+      : sendMailToRegister;
+    await enviarCorreoRegistro(normalizedEmail, token);
     await nuevoDonante.save();
 
     res
@@ -103,9 +200,10 @@ const confirmarMail = async (req, res) => {
 
     await user.save();
 
-    res
-      .status(200)
-      .json({ msg: "Cuenta confirmada, ya puedes iniciar sesión" });
+    res.status(200).json({
+      msg: "Cuenta confirmada, ya puedes iniciar sesión",
+      rol: user.rol,
+    });
   } catch (error) {
     console.error(error);
     res.status(500).json({ msg: `❌ Error en el servidor - ${error}` });
@@ -114,23 +212,32 @@ const confirmarMail = async (req, res) => {
 
 const recuperarPassword = async (req, res) => {
   try {
-    const { email } = req.body || {};
+    const { email, origen } = req.body || {};
+    const esMovil = origen === "movil";
     if (isBlank(email))
       return res
         .status(400)
         .json({ msg: "Debes ingresar un correo electrónico" });
 
     const normalizedEmail = email.trim().toLowerCase();
-    const donante = await Donante.findOne({ email: normalizedEmail });
-    if (!donante)
+    const cuenta = await findResetAccountByEmail(normalizedEmail);
+    if (!cuenta)
       return res
         .status(404)
         .json({ msg: "El usuario no se encuentra registrado" });
 
-    const token = donante.createToken();
-    donante.token = token;
-    await sendMailToRecoveryPassword(normalizedEmail, token);
-    await donante.save();
+    const token = cuenta.createToken();
+    cuenta.token = token;
+    // Solo el flujo móvil expira. En la web se limpia para no heredar una fecha vieja.
+    cuenta.tokenExpires = esMovil
+      ? new Date(Date.now() + RECOVERY_TOKEN_MINUTES * 60 * 1000)
+      : null;
+
+    const enviarCorreoRecuperacion = esMovil
+      ? sendMailToRecoveryPasswordMobile
+      : sendMailToRecoveryPassword;
+    await enviarCorreoRecuperacion(normalizedEmail, token);
+    await cuenta.save();
     res.status(200).json({
       msg: "Revisa tu correo electrónico para reestablecer tu cuenta",
     });
@@ -146,11 +253,16 @@ const comprobarTokenPasword = async (req, res) => {
     if (!isValidToken(token)) {
       return res.status(400).json({ msg: "Token inválido o malformado" });
     }
-    const donante = await Donante.findOne({ token });
-    if (!donante || donante.token !== token) {
+    const cuenta = await findResetAccountByToken(token);
+    if (!cuenta || cuenta.token !== token) {
       return res
         .status(404)
         .json({ msg: "Lo sentimos, no se puede validar la cuenta" });
+    }
+    if (isTokenExpired(cuenta)) {
+      return res.status(410).json({
+        msg: "El enlace para restablecer la contraseña expiró. Solicita uno nuevo",
+      });
     }
     res
       .status(200)
@@ -193,16 +305,22 @@ const crearNuevoPassword = async (req, res) => {
         .json({ msg: "Los passwords no coinciden" });
     }
 
-    const donante = await Donante.findOne({ token });
-    if (!donante) {
+    const cuenta = await findResetAccountByToken(token);
+    if (!cuenta) {
       return res
         .status(404)
         .json({ msg: "No se puede validar la cuenta" });
     }
+    if (isTokenExpired(cuenta)) {
+      return res.status(410).json({
+        msg: "El enlace para restablecer la contraseña expiró. Solicita uno nuevo",
+      });
+    }
 
-    donante.token = null;
-    donante.password = await donante.encryptPassword(password);
-    await donante.save();
+    cuenta.token = null;
+    cuenta.tokenExpires = null;
+    cuenta.password = await cuenta.encryptPassword(password);
+    await cuenta.save();
 
     res.status(200).json({
       msg: "Felicitaciones, ya puedes iniciar sesión con tu nuevo password",
@@ -232,7 +350,7 @@ const login = async (req, res) => {
         .status(404)
         .json({ msg: "El usuario no se encuentra registrado" });
     if (donante.status === false)
-      return res.status(403).json({ msg: "Cuenta desactivada" });
+      return res.status(403).json({ msg: "Cuenta desactivada", activo: false });
     if (!donante.confirmEmail)
       return res
         .status(403)
@@ -253,9 +371,11 @@ const login = async (req, res) => {
       perfilCompleto,
     } = donante;
     const token = crearTokenJWT(donante._id, donante.rol);
+    const refreshToken = crearRefreshToken(donante._id, donante.rol);
 
     res.status(200).json({
       token,
+      refreshToken,
       rol,
       nombre,
       apellido,
@@ -268,6 +388,44 @@ const login = async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ msg: `❌ Error en el servidor - ${error}` });
+  }
+};
+
+const refreshDonanteSession = async (req, res) => {
+  try {
+    const rawToken = String(
+      req.body?.refreshToken || req.headers?.authorization || ""
+    ).trim();
+    const refreshToken = rawToken.startsWith("Bearer ")
+      ? rawToken.replace("Bearer ", "")
+      : rawToken;
+
+    if (!refreshToken) {
+      return res.status(400).json({ msg: "Refresh token requerido" });
+    }
+
+    const decoded = verificarRefreshToken(refreshToken);
+    const donante = await Donante.findById(decoded.id);
+    if (!donante) {
+      return res.status(401).json({ msg: "Usuario no autorizado" });
+    }
+    if (donante.status === false) {
+      return res.status(403).json({ msg: "Cuenta desactivada", activo: false });
+    }
+
+    const token = crearTokenJWT(donante._id, donante.rol);
+    const nextRefreshToken = crearRefreshToken(donante._id, donante.rol);
+
+    return res.status(200).json({
+      token,
+      refreshToken: nextRefreshToken,
+      rol: donante.rol,
+      _id: donante._id,
+      correo: donante.email,
+    });
+  } catch (error) {
+    console.error("refreshDonanteSession error:", error.message);
+    return res.status(401).json({ msg: "Refresh token inválido o expirado" });
   }
 };
 
@@ -374,11 +532,14 @@ const actualizarPassword = async (req, res) => {
 
 export {
   registro,
+  reenviarConfirmacion,
+  solicitarContactoAdmin,
   confirmarMail,
   recuperarPassword,
   comprobarTokenPasword,
   crearNuevoPassword,
   login,
+  refreshDonanteSession,
   perfil,
   actualizarPerfil,
   actualizarPassword,

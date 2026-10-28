@@ -21,7 +21,9 @@ const donanteSchema = new Schema(
     perfilCompleto: { type: Boolean, default: true },
     status: { type: Boolean, default: true },
     confirmEmail: { type: Boolean, default: false },
-    token: { type: String, default: null }
+    token: { type: String, default: null },
+    // Solo se usa en la recuperación de contraseña desde la app móvil.
+    tokenExpires: { type: Date, default: null }
   },
   { timestamps: true }
 );
@@ -54,6 +56,7 @@ donanteSchema.methods.toJSON = function () {
   const obj = this.toObject();
   delete obj.password;
   delete obj.token;
+  delete obj.tokenExpires;
   return obj;
 };
 

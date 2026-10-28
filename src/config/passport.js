@@ -91,8 +91,6 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
       }
     )
   );
-} else {
-  console.warn("Google OAuth no configurado: falta GOOGLE_CLIENT_ID/SECRET");
 }
 
 export default passport;

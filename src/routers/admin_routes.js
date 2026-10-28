@@ -7,6 +7,7 @@ import {
   comprobarTokenPasswordAdmin,
   crearNuevoPasswordAdmin,
   loginAdmin,
+  refreshAdminSession,
   listarUsuarios,
   listarRecolectores,
   obtenerUsuario,
@@ -19,12 +20,15 @@ import {
 } from "../controllers/admin_controller.js";
 import { confirmarMail } from "../controllers/donante_controller.js";
 import { getDashboardStats } from "../controllers/dashboard_controller.js";
+import { googleAdminMobileLogin } from "../controllers/google_controller.js";
 
 const router = Router();
 
 // Crear el primer admin con un secreto (una sola vez)
 router.post("/registro", bootstrapAdmin);
 router.post("/login", loginAdmin);
+router.post("/refresh", refreshAdminSession);
+router.post("/google", googleAdminMobileLogin);
 router.get("/confirmar/:token", confirmarMail);
 router.post("/recuperarpassword", recuperarPasswordAdmin);
 router.get("/recuperarpassword/:token", comprobarTokenPasswordAdmin);

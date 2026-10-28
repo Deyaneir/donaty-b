@@ -13,7 +13,11 @@ const recolectorSchema = new Schema(
     rol: { type: String, enum: ["recolector"], default: "recolector", lowercase: true, trim: true },
     status: { type: Boolean, default: true },
     confirmEmail: { type: Boolean, default: false },
-    token: { type: String, default: null }
+    // Aprobación del administrador. Default true para no bloquear a los
+    // recolectores que ya existían; los registros nuevos se crean en false.
+    aprobado: { type: Boolean, default: true },
+    token: { type: String, default: null },
+    tokenExpires: { type: Date, default: null }
   },
   { timestamps: true }
 );
@@ -45,6 +49,7 @@ recolectorSchema.methods.toJSON = function () {
   const obj = this.toObject();
   delete obj.password;
   delete obj.token;
+  delete obj.tokenExpires;
   return obj;
 };
 

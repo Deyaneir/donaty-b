@@ -2,7 +2,11 @@ import mongoose from "mongoose";
 import Donante from "../models/Donante.js";
 import Admin from "../models/Admin.js";
 import Recolector from "../models/Recolector.js";
-import { crearTokenJWT } from "../middlewares/JWT.js";
+import {
+  crearTokenJWT,
+  crearRefreshToken,
+  verificarRefreshToken,
+} from "../middlewares/JWT.js";
 import { isBlank, requireFields } from "../utils/validation.js";
 import { sendMailToRegister, sendMailToRecoveryPassword } from "../helpers/sendMail.js";
 
@@ -229,7 +233,7 @@ const loginAdmin = async (req, res) => {
         .json({ msg: "El usuario no se encuentra registrado" });
     }
     if (admin.status === false) {
-      return res.status(403).json({ msg: "Cuenta desactivada" });
+      return res.status(403).json({ msg: "Cuenta desactivada", activo: false });
     }
     if (!admin.confirmEmail) {
       return res
@@ -244,9 +248,11 @@ const loginAdmin = async (req, res) => {
 
     const { nombre, apellido, direccion, telefono, _id } = admin;
     const token = crearTokenJWT(admin._id, "admin");
+    const refreshToken = crearRefreshToken(admin._id, "admin");
 
     return res.status(200).json({
       token,
+      refreshToken,
       rol: "admin",
       nombre,
       apellido,
@@ -258,6 +264,44 @@ const loginAdmin = async (req, res) => {
   } catch (error) {
     console.error(error);
     return res.status(500).json({ msg: `❌ Error en el servidor - ${error}` });
+  }
+};
+
+const refreshAdminSession = async (req, res) => {
+  try {
+    const rawToken = String(
+      req.body?.refreshToken || req.headers?.authorization || ""
+    ).trim();
+    const refreshToken = rawToken.startsWith("Bearer ")
+      ? rawToken.replace("Bearer ", "")
+      : rawToken;
+
+    if (!refreshToken) {
+      return res.status(400).json({ msg: "Refresh token requerido" });
+    }
+
+    const decoded = verificarRefreshToken(refreshToken);
+    const admin = await Admin.findById(decoded.id);
+    if (!admin) {
+      return res.status(401).json({ msg: "Usuario no autorizado" });
+    }
+    if (admin.status === false) {
+      return res.status(403).json({ msg: "Cuenta desactivada", activo: false });
+    }
+
+    const token = crearTokenJWT(admin._id, "admin");
+    const nextRefreshToken = crearRefreshToken(admin._id, "admin");
+
+    return res.status(200).json({
+      token,
+      refreshToken: nextRefreshToken,
+      rol: "admin",
+      _id: admin._id,
+      correo: admin.email,
+    });
+  } catch (error) {
+    console.error("refreshAdminSession error:", error.message);
+    return res.status(401).json({ msg: "Refresh token inválido o expirado" });
   }
 };
 
@@ -505,19 +549,16 @@ const actualizarStatus = async (req, res) => {
 const actualizarStatusRecolector = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body || {};
+    const { aprobado } = req.body || {};
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({ msg: `ID inválido: ${id}` });
     }
 
-    if (isBlank(status)) {
-      return res.status(400).json({ msg: "Debes llenar todos los campos" });
-    }
-
-    const nuevoStatus = parseBoolean(status);
-    if (nuevoStatus === null) {
-      return res.status(400).json({ msg: "Status inválido" });
+    if (typeof aprobado !== "boolean") {
+      return res.status(400).json({
+        msg: "Debes indicar si el recolector queda aprobado (true) o rechazado (false)",
+      });
     }
 
     const recolector = await Recolector.findById(id);
@@ -527,9 +568,14 @@ const actualizarStatusRecolector = async (req, res) => {
         .json({ msg: `No existe el recolector con ID ${id}` });
     }
 
-    recolector.status = nuevoStatus;
+    recolector.aprobado = aprobado;
     await recolector.save();
-    return res.status(200).json(recolector.toJSON());
+    return res.status(200).json({
+      msg: aprobado
+        ? "Recolector aprobado correctamente"
+        : "Solicitud de recolector rechazada correctamente",
+      recolector: recolector.toJSON(),
+    });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ msg: `❌ Error en el servidor - ${error}` });
@@ -582,6 +628,7 @@ export {
   comprobarTokenPasswordAdmin,
   crearNuevoPasswordAdmin,
   loginAdmin,
+  refreshAdminSession,
   listarUsuarios,
   obtenerUsuario,
   listarRecolectores,

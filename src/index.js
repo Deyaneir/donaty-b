@@ -9,7 +9,6 @@ const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.join(__dirname, "..", ".env") });
 
 console.log("[ENV] keys:", Object.keys(process.env).length);
-console.log("[ENV] STRIPE_SECRET_KEY:", process.env.STRIPE_SECRET_KEY ? "OK" : "MISSING");
 
 const { default: app } = await import("./server.js");
 const { default: connectDB } = await import("./database.js");

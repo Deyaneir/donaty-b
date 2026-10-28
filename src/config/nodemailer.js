@@ -28,13 +28,14 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-const sendMail = async (to, subject, html) => {
+const sendMail = async (to, subject, html, options = {}) => {
   try {
     const info = await transporter.sendMail({
       from: mailFrom,
       to,
       subject,
       html,
+      ...options,
     });
 
     console.log("Email enviado:", info.messageId);
@@ -43,6 +44,28 @@ const sendMail = async (to, subject, html) => {
     console.error("Error enviando email:", error.message);
     throw error;
   }
+};
+
+export const sendMailToAdminRequest = ({ nombre, email, mensaje }, recipient) => {
+  const escapeHtml = (value) =>
+    String(value).replace(/[&<>"']/g, (character) => ({
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    })[character]);
+
+  return sendMail(
+    recipient,
+    "Nueva solicitud de contacto - DONATY-EC",
+    `<h1>Solicitud de contacto</h1>
+      <p><strong>Nombre:</strong> ${escapeHtml(nombre)}</p>
+      <p><strong>Correo:</strong> ${escapeHtml(email)}</p>
+      <p><strong>Mensaje:</strong></p>
+      <p>${escapeHtml(mensaje).replace(/\n/g, "<br>")}</p>`,
+    { replyTo: email }
+  );
 };
 
 export const sendMailToRecoveryPassword = (userMail, token) => {

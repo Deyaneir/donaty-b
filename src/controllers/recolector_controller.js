@@ -4,17 +4,31 @@ import Admin from "../models/Admin.js";
 import Recolector from "../models/Recolector.js";
 import {
   sendMailToRecoveryPassword,
+  sendMailToRecoveryPasswordMobile,
   sendMailToRegister,
+  sendMailToRegisterMobile,
 } from "../helpers/sendMail.js";
-import { crearTokenJWT } from "../middlewares/JWT.js";
+import {
+  crearTokenJWT,
+  crearRefreshToken,
+  verificarRefreshToken,
+} from "../middlewares/JWT.js";
 import { isBlank, requireFields } from "../utils/validation.js";
+
+const RECOVERY_TOKEN_MINUTES = 60;
 
 const isValidToken = (token = "") =>
   typeof token === "string" && token.trim().length === 32;
+const isTokenExpired = (doc) =>
+  Boolean(doc?.tokenExpires && doc.tokenExpires < new Date());
 
 const registroRecolector = async (req, res) => {
   try {
-    const { nombre, apellido, direccion, telefono, email, password } = req.body || {};
+    const { nombre, apellido, direccion, telefono, email, password, origen } =
+      req.body || {};
+    const esMovil = origen === "movil";
+    console.log("[registroRecolector] origen recibido:", origen);
+
     const faltantes = requireFields(req.body, [
       "nombre",
       "apellido",
@@ -49,6 +63,7 @@ const registroRecolector = async (req, res) => {
       email: normalizedEmail,
       status: true,
       confirmEmail: false,
+      aprobado: false, // pendiente de aprobación del administrador
     });
     nuevoRecolector.password = await nuevoRecolector.encryptPassword(password);
 
@@ -56,7 +71,11 @@ const registroRecolector = async (req, res) => {
     nuevoRecolector.token = token;
     nuevoRecolector.confirmEmail = false;
 
-    await sendMailToRegister(normalizedEmail, token);
+    // Web: correo de siempre. App móvil: correo con botón que abre la app.
+    const enviarCorreoRegistro = esMovil
+      ? sendMailToRegisterMobile
+      : sendMailToRegister;
+    await enviarCorreoRegistro(normalizedEmail, token);
     await nuevoRecolector.save();
 
     res
@@ -70,7 +89,8 @@ const registroRecolector = async (req, res) => {
 
 const recuperarPasswordRecolector = async (req, res) => {
   try {
-    const { email } = req.body || {};
+    const { email, origen } = req.body || {};
+    const esMovil = origen === "movil";
     if (isBlank(email))
       return res
         .status(400)
@@ -87,7 +107,15 @@ const recuperarPasswordRecolector = async (req, res) => {
 
     const token = recolector.createToken();
     recolector.token = token;
-    await sendMailToRecoveryPassword(normalizedEmail, token);
+    // Solo el flujo móvil expira. En la web se limpia para no heredar una fecha vieja.
+    recolector.tokenExpires = esMovil
+      ? new Date(Date.now() + RECOVERY_TOKEN_MINUTES * 60 * 1000)
+      : null;
+
+    const enviarCorreoRecuperacion = esMovil
+      ? sendMailToRecoveryPasswordMobile
+      : sendMailToRecoveryPassword;
+    await enviarCorreoRecuperacion(normalizedEmail, token);
     await recolector.save();
     res.status(200).json({
       msg: "Revisa tu correo electrónico para reestablecer tu cuenta",
@@ -109,6 +137,11 @@ const comprobarTokenPasswordRecolector = async (req, res) => {
       return res
         .status(404)
         .json({ msg: "Lo sentimos, no se puede validar la cuenta" });
+    }
+    if (isTokenExpired(recolector)) {
+      return res.status(410).json({
+        msg: "El enlace para restablecer la contraseña expiró. Solicita uno nuevo",
+      });
     }
     res
       .status(200)
@@ -155,8 +188,14 @@ const crearNuevoPasswordRecolector = async (req, res) => {
         .status(404)
         .json({ msg: "No se puede validar la cuenta" });
     }
+    if (isTokenExpired(recolector)) {
+      return res.status(410).json({
+        msg: "El enlace para restablecer la contraseña expiró. Solicita uno nuevo",
+      });
+    }
 
     recolector.token = null;
+    recolector.tokenExpires = null;
     recolector.password = await recolector.encryptPassword(password);
     await recolector.save();
 
@@ -188,7 +227,7 @@ const loginRecolector = async (req, res) => {
         .status(404)
         .json({ msg: "El usuario no se encuentra registrado" });
     if (recolector.status === false)
-      return res.status(403).json({ msg: "Cuenta desactivada" });
+      return res.status(403).json({ msg: "Cuenta desactivada", activo: false });
     if (!recolector.confirmEmail)
       return res
         .status(403)
@@ -197,6 +236,15 @@ const loginRecolector = async (req, res) => {
     const verificarPassword = await recolector.matchPassword(password);
     if (!verificarPassword)
       return res.status(401).json({ msg: "El password no es correcto" });
+
+    // Se revisa después de validar la contraseña, para no revelar el estado
+    // de la cuenta a quien no tenga las credenciales.
+    if (recolector.aprobado === false)
+      return res.status(403).json({
+        msg:
+          "Tu cuenta está pendiente de aprobación del administrador. " +
+          "Podrás iniciar sesión cuando sea aprobada.",
+      });
 
     const {
       nombre,
@@ -208,9 +256,11 @@ const loginRecolector = async (req, res) => {
       rol,
     } = recolector;
     const token = crearTokenJWT(recolector._id, recolector.rol);
+    const refreshToken = crearRefreshToken(recolector._id, recolector.rol);
 
     res.status(200).json({
       token,
+      refreshToken,
       rol,
       nombre,
       apellido,
@@ -222,6 +272,49 @@ const loginRecolector = async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ msg: `❌ Error en el servidor - ${error}` });
+  }
+};
+
+const refreshRecolectorSession = async (req, res) => {
+  try {
+    const rawToken = String(
+      req.body?.refreshToken || req.headers?.authorization || ""
+    ).trim();
+    const refreshToken = rawToken.startsWith("Bearer ")
+      ? rawToken.replace("Bearer ", "")
+      : rawToken;
+
+    if (!refreshToken) {
+      return res.status(400).json({ msg: "Refresh token requerido" });
+    }
+
+    const decoded = verificarRefreshToken(refreshToken);
+    const recolector = await Recolector.findById(decoded.id);
+    if (!recolector) {
+      return res.status(401).json({ msg: "Usuario no autorizado" });
+    }
+    if (recolector.status === false) {
+      return res.status(403).json({ msg: "Cuenta desactivada", activo: false });
+    }
+    if (recolector.aprobado === false) {
+      return res.status(403).json({
+        msg: "Tu cuenta está pendiente de aprobación del administrador.",
+      });
+    }
+
+    const token = crearTokenJWT(recolector._id, recolector.rol);
+    const nextRefreshToken = crearRefreshToken(recolector._id, recolector.rol);
+
+    return res.status(200).json({
+      token,
+      refreshToken: nextRefreshToken,
+      rol: recolector.rol,
+      _id: recolector._id,
+      correo: recolector.email,
+    });
+  } catch (error) {
+    console.error("refreshRecolectorSession error:", error.message);
+    return res.status(401).json({ msg: "Refresh token inválido o expirado" });
   }
 };
 
@@ -329,6 +422,7 @@ export {
   comprobarTokenPasswordRecolector,
   crearNuevoPasswordRecolector,
   loginRecolector,
+  refreshRecolectorSession,
   perfilRecolector,
   actualizarPerfilRecolector,
   actualizarPasswordRecolector,
