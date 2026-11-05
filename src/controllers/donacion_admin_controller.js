@@ -1,6 +1,10 @@
 import mongoose from "mongoose";
 import Donacion from "../models/Donacion.js";
 import Recolector from "../models/Recolector.js";
+import Campana from "../models/Campana.js";
+import ChatConversation from "../models/ChatConversation.js";
+import { notifyUsers } from "../services/firebase_notifications.js";
+import { TERMINAL_DONATION_STATES } from "../services/donationAssignment.js";
 
 const ESTADOS = [
   "pendiente",
@@ -92,7 +96,7 @@ const listarRecolectoresAsignables = async (_req, res) => {
         {
           $match: {
             tipo: "fisica",
-            estado: "asignada",
+            estado: { $nin: TERMINAL_DONATION_STATES },
             recolector: { $ne: null },
           },
         },
@@ -159,19 +163,44 @@ const asignarDonacionAdmin = async (req, res) => {
     }
 
     const actual = await Donacion.findOne({ _id: id, tipo: "fisica" }).select(
-      "estado recolector"
+      "estado recolector campana puntoRecoleccionRef"
     );
     if (!actual) {
       return res.status(404).json({ msg: "Donación no encontrada" });
+    }
+    if (actual.campana) {
+      const campaign = await Campana.findById(actual.campana)
+        .select("puntosRecoleccion")
+        .lean();
+      const point = campaign?.puntosRecoleccion?.find(
+        (item) => String(item._id) === String(actual.puntoRecoleccionRef)
+      );
+      if (
+        !point
+        || point.activo === false
+        || String(point.estado || "").toLowerCase() === "inactivo"
+        || !(point.recolectores || []).some(
+          (assignedId) => String(assignedId) === String(recolector._id)
+        )
+      ) {
+        return res.status(409).json({
+          msg: "El recolector debe estar asignado al punto de recolección de esta campaña",
+        });
+      }
     }
 
     let filtro;
     let cambios;
     let reasignacion = false;
+    const fechaAsignacion = new Date();
 
     if (actual.estado === "pendiente") {
       filtro = { _id: id, tipo: "fisica", estado: "pendiente" };
-      cambios = { recolector: recolector._id, estado: "asignada" };
+      cambios = {
+        recolector: recolector._id,
+        estado: "asignada",
+        fechaAsignacion,
+      };
     } else if (actual.estado === "asignada") {
       if (String(actual.recolector) === String(recolector._id)) {
         return res.status(409).json({
@@ -179,7 +208,7 @@ const asignarDonacionAdmin = async (req, res) => {
         });
       }
       filtro = { _id: id, tipo: "fisica", estado: "asignada" };
-      cambios = { recolector: recolector._id };
+      cambios = { recolector: recolector._id, fechaAsignacion };
       reasignacion = true;
     } else {
       return res.status(409).json({
@@ -192,8 +221,31 @@ const asignarDonacionAdmin = async (req, res) => {
 
     // El filtro por estado hace el cambio atómico: si otro proceso cambió la
     // donación justo antes, no se modifica.
+    const historial = {
+      recolectorAnterior: actual.recolector || null,
+      recolectorNuevo: recolector._id,
+      puntoRecoleccionAnterior: actual.puntoRecoleccionRef || null,
+      puntoRecoleccionNuevo: actual.puntoRecoleccionRef || null,
+      administrador: req.user._id,
+      fecha: fechaAsignacion,
+      motivo: String(req.body?.motivo ?? "").trim().slice(0, 500),
+    };
+    const update = {
+      $set: cambios,
+      $push: { historialRecolectores: historial },
+    };
+    filtro.recolector = actual.recolector || null;
+    if (cambios.estado !== undefined && actual.estado !== cambios.estado) {
+      update.$push.historialEstados = {
+        estado: cambios.estado,
+        responsable: req.user._id,
+        rolResponsable: "admin",
+        fecha: new Date(),
+        observaciones: String(req.body?.observaciones ?? "").trim().slice(0, 1000),
+      };
+    }
     const donacion = await conRelaciones(
-      Donacion.findOneAndUpdate(filtro, { $set: cambios }, { new: true })
+      Donacion.findOneAndUpdate(filtro, update, { new: true })
     );
 
     if (!donacion) {
@@ -205,6 +257,49 @@ const asignarDonacionAdmin = async (req, res) => {
           ". Actualiza la lista e inténtalo de nuevo.",
       });
     }
+
+    if (reasignacion && actual.recolector) {
+      const conversation = await ChatConversation.findOne({ room: String(id), type: "donation" });
+      if (conversation) {
+        const donorReadAt = conversation.participants.find(
+          (participant) => participant.role === "donante" &&
+            String(participant.userId) === String(donacion.donante?._id)
+        )?.lastReadAt ?? null;
+        conversation.participants = [
+          ...(donacion.donante?._id
+            ? [{ userId: donacion.donante._id, role: "donante", lastReadAt: donorReadAt }]
+            : []),
+          { userId: recolector._id, role: "recolector", lastReadAt: new Date() },
+        ];
+        await conversation.save();
+      }
+
+      const io = req.app.get("io");
+      if (io) {
+        const previousCollectorId = String(actual.recolector);
+        const sockets = await io.in(String(id)).fetchSockets();
+        for (const activeSocket of sockets) {
+          if (String(activeSocket.data.user?._id) === previousCollectorId) {
+            await activeSocket.leave(String(id));
+            activeSocket.emit("roomAccessRevoked", {
+              roomId: String(id),
+              msg: "La donación fue reasignada y ya no tienes acceso al chat",
+            });
+          }
+        }
+      }
+    }
+
+    void notifyUsers({
+      eventKey: `donation-assigned:${donacion._id}:${recolector._id}`,
+      recipients: [{ userId: recolector._id, role: "recolector" }],
+      title: "Nueva donación asignada",
+      body: `Código ${donacion._id}: revisa los detalles de la donación.`,
+      data: {
+        type: "donation_assigned",
+        donationId: donacion._id,
+      },
+    });
 
     return res.status(200).json({
       msg: reasignacion

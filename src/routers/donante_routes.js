@@ -15,6 +15,7 @@ import {
   actualizarPassword
 } from "../controllers/donante_controller.js";
 import auth from "../middlewares/JWT.js";
+import requireRole from "../middlewares/requireRole.js";
 import requirePerfilCompleto from "../middlewares/requirePerfilCompleto.js";
 import passport from "passport";
 import {
@@ -53,7 +54,7 @@ router.get("/google/callback", (req, res, next) => {
 router.post("/google", googleMobileLogin);
 
 router.get("/perfil", auth, perfil);
-router.put("/actualizarperfil/:id", auth, actualizarPerfil);
+router.put("/actualizarperfil/:id", auth, requireRole("donante"), actualizarPerfil);
 // si insistes en usar id en la URL: router.put("/actualizarpassword/:id", auth, actualizarPassword);
 router.put("/actualizarpassword/:id", auth, requirePerfilCompleto, actualizarPassword);
 

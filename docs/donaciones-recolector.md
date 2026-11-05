@@ -29,6 +29,21 @@ Para JSON, las ubicaciones se envían así:
 
 En `multipart/form-data`, `donanteExterno` y `puntoRecoleccion` pueden ser JSON serializado. También se aceptan los campos `donanteLatitud`, `donanteLongitud`, `puntoRecoleccionLatitud` y `puntoRecoleccionLongitud`. Como compatibilidad, `latitud` y `longitud` se interpretan como coordenadas del punto de recolección. Cada ubicación debe enviar ambas coordenadas; latitud va de -90 a 90 y longitud de -180 a 180. Son opcionales.
 
+La ubicación seleccionada para la donación puede enviarse adicionalmente como el campo `ubicacionRecoleccion`, serializado como JSON en multipart:
+
+```json
+{
+  "latitude": -0.210145,
+  "longitude": -78.488712,
+  "source": "gps_real",
+  "isSimulated": false,
+  "buildingId": 16,
+  "buildingName": "Facultad de Ingeniería Eléctrica y Electrónica"
+}
+```
+
+`buildingId` y `buildingName` son opcionales. `source` admite `gps_real`, `simulated` o `map`; las coordenadas y el origen se guardan en `donacion.ubicacionRecoleccion` y se devuelven en las respuestas autenticadas de registro, consulta y edición. Si `isSimulated` es verdadero (o `source` es `simulated`), el servidor normaliza el origen a `simulated` y no copia esas coordenadas al campo heredado `puntoRecoleccion`, que queda reservado para coordenadas GPS reales en este flujo. Una ubicación de origen `map` tampoco se trata como GPS real. El campo `direccionEntrega` se conserva de forma independiente.
+
 ## Lista asignada
 
 `GET /api/donacion/asignadas` devuelve donaciones cuyo campo `recolector` coincide con el recolector autenticado, incluidas las externas que se autoasignan al registrarlas. Las donaciones de un donante con cuenta aparecen solo después de que un administrador las asigne. No devuelve donaciones sin recolector asignado ni asignaciones de otros recolectores.

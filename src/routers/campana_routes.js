@@ -6,6 +6,10 @@ import {
   listarCampanas,
   crearCampana,
   actualizarCampana,
+  listarDistribucionRecolectores,
+  distribuirRecolectores,
+  reasignarRecolectorAPunto,
+  listarUbicacionesRecolectores,
 } from "../controllers/campana_controller.js";
 import {
   listarCategoriasDeCampana,
@@ -13,6 +17,31 @@ import {
 } from "../controllers/categoria_controller.js";
 
 const router = Router();
+
+router.get(
+  "/:campaignId/distribucion-recolectores",
+  auth,
+  requireRole("admin"),
+  listarDistribucionRecolectores
+);
+router.post(
+  "/:campaignId/distribucion-recolectores",
+  auth,
+  requireRole("admin"),
+  distribuirRecolectores
+);
+router.put(
+  "/:campaignId/puntos/:pointId/reasignar",
+  auth,
+  requireRole("admin"),
+  reasignarRecolectorAPunto
+);
+router.get(
+  "/:campaignId/ubicaciones-recolectores",
+  auth,
+  requireRole("admin"),
+  listarUbicacionesRecolectores
+);
 
 // Consultar campañas:
 // admin, donante y recolector.

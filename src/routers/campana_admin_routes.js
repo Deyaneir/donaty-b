@@ -8,8 +8,12 @@ import {
 } from "../controllers/campana_controller.js";
 import {
   listarCampanasAdmin,
+  listarPuntosDeCampana,
   donacionesDeCampana,
   eliminarCampana,
+  crearPuntoRecoleccion,
+  actualizarPuntoRecoleccion,
+  eliminarPuntoRecoleccion,
 } from "../controllers/campana_admin_controller.js";
 
 const router = Router();
@@ -17,6 +21,14 @@ const router = Router();
 router.use(auth);
 
 router.get("/admin/lista", requireRole("admin"), listarCampanasAdmin);
+router.get(
+  "/:campanaId/puntos",
+  requireRole("admin", "donante", "recolector"),
+  listarPuntosDeCampana
+);
+router.post("/:campaignId/puntos", requireRole("admin"), crearPuntoRecoleccion);
+router.patch("/:campaignId/puntos/:pointId", requireRole("admin"), actualizarPuntoRecoleccion);
+router.delete("/:campaignId/puntos/:pointId", requireRole("admin"), eliminarPuntoRecoleccion);
 router.get("/:id/donaciones", requireRole("admin"), donacionesDeCampana);
 router.delete("/:id", requireRole("admin"), eliminarCampana);
 

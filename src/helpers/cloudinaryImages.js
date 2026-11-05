@@ -25,7 +25,7 @@ const uploadImage = async (file, folder) => {
     error.statusCode = 400;
     throw error;
   }
-  if (file.size > MAX_IMAGE_SIZE) {
+  if (file.truncated || file.size > MAX_IMAGE_SIZE) {
     const error = new Error("La imagen no puede superar 5 MB");
     error.statusCode = 400;
     throw error;

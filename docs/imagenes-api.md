@@ -1,5 +1,11 @@
 # Imagenes de campañas y donaciones
 
+## Evidencia de donaciones
+
+El análisis en `POST /api/donacion/analizar-imagen` solo usa y elimina su archivo temporal local; no guarda una imagen permanente ni devuelve un identificador de carga. La app debe conservar el archivo original después del análisis y volver a adjuntarlo como `imagen` al registrar con `POST /api/donacion` o `POST /api/donacion/registrar-por-recolector`. El backend lo sube a Cloudinary y guarda `imagenUrl` e `imagenPublicId` en el mismo documento de donación. La respuesta de registro incluye esos campos dentro de `donacion`; para mostrar la evidencia en detalle, usar `donacion.imagenUrl`.
+
+Cada donación admite actualmente una imagen. El archivo temporal empleado para el análisis y la evidencia permanente de Cloudinary son independientes: borrar el temporal no elimina la evidencia.
+
 Los endpoints existentes conservan sus URLs. Para enviar una imagen, usa `multipart/form-data`, conserva los campos actuales como partes de formulario y agrega opcionalmente un archivo llamado `imagen`.
 
 | Metodo | Endpoint | Imagen |
@@ -12,7 +18,7 @@ Los endpoints existentes conservan sus URLs. Para enviar una imagen, usa `multip
 
 Las rutas conservan sus permisos y sus campos de texto existentes. En actualizaciones, no enviar `imagen` deja intacta la imagen actual. Al reemplazarla, se elimina de Cloudinary la imagen anterior después de guardar correctamente el documento. Las eliminaciones existentes de donaciones también eliminan su imagen asociada.
 
-Se aceptan JPG, PNG y WebP hasta 5 MB. El servidor usa las credenciales ya configuradas por `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY` y `CLOUDINARY_API_SECRET`, almacenando los archivos en `donaty/campanas` y `donaty/donaciones`. La respuesta del recurso contiene `imagenUrl` y `imagenPublicId`; el cliente debe mostrar `imagenUrl` y no debe modificar `imagenPublicId`.
+Se aceptan JPG, PNG y WebP hasta 5 MB. El servidor usa las credenciales ya configuradas por `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY` y `CLOUDINARY_API_SECRET`, almacenando los archivos en `donaty/campanas` y `donaty/donaciones`. La respuesta del recurso contiene `imagenUrl` y `imagenPublicId`; el cliente debe mostrar `imagenUrl` y no debe modificar `imagenPublicId`. Si falla la creación de la donación después de subir la foto, el backend intenta eliminar el archivo recién subido para evitar huérfanos.
 
 Ejemplo cURL de creación de donación (mantén el resto de campos que exige tu flujo):
 

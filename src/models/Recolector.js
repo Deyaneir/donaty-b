@@ -8,16 +8,48 @@ const recolectorSchema = new Schema(
     apellido: { type: String, required: true, trim: true },
     direccion: { type: String, default: "", trim: true },
     telefono: { type: String, default: "", trim: true },
+    ciudad: { type: String, default: "", trim: true },
+    sector: { type: String, default: "", trim: true },
+    fechaNacimiento: { type: Date, default: null },
+    universidad: { type: String, default: "", trim: true },
+    carrera: { type: String, default: "", trim: true },
+    semestre: { type: String, default: "", trim: true },
+    perteneceAsociacion: { type: Boolean, default: null },
+    asociacionEstudiantil: { type: String, default: "", trim: true },
+    cargoAsociacion: { type: String, default: "", trim: true },
+    aceptaTerminos: { type: Boolean, default: false },
+    aceptaPrivacidad: { type: Boolean, default: false },
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    googleId: { type: String, default: null, index: true },
     password: { type: String, required: true, select: false },
     rol: { type: String, enum: ["recolector"], default: "recolector", lowercase: true, trim: true },
+    rolMigradoA: {
+      type: String,
+      enum: ["donante", "recolector"],
+      default: null,
+      index: true,
+    },
     status: { type: Boolean, default: true },
     confirmEmail: { type: Boolean, default: false },
     // Aprobación del administrador. Default true para no bloquear a los
     // recolectores que ya existían; los registros nuevos se crean en false.
     aprobado: { type: Boolean, default: true },
     token: { type: String, default: null },
-    tokenExpires: { type: Date, default: null }
+    tokenExpires: { type: Date, default: null },
+    ubicacionGps: {
+      campana: { type: Schema.Types.ObjectId, ref: "Campana", default: null },
+      puntoRecoleccion: { type: Schema.Types.ObjectId, default: null },
+      latitud: { type: Number, min: -90, max: 90, default: null },
+      longitud: { type: Number, min: -180, max: 180, default: null },
+      precisionMetros: { type: Number, min: 0, default: null },
+      capturadoEn: { type: Date, default: null },
+      estadoGeografico: {
+        type: String,
+        enum: ["dentro", "fuera"],
+        default: null,
+      },
+      actualizadoEn: { type: Date, default: null },
+    },
   },
   { timestamps: true }
 );
@@ -50,6 +82,8 @@ recolectorSchema.methods.toJSON = function () {
   delete obj.password;
   delete obj.token;
   delete obj.tokenExpires;
+  delete obj.ubicacionGps;
+  delete obj.googleId;
   return obj;
 };
 

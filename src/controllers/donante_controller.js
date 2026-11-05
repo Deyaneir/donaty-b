@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import Donante from "../models/Donante.js";
+import { validateMobileRegistrationProfile } from "../utils/mobileRegistrationValidation.js";
 import Admin from "../models/Admin.js";
 import Recolector from "../models/Recolector.js";
 import {
@@ -35,8 +36,8 @@ const reenviarConfirmacion = async (req, res) => {
     }
 
     const cuentas = await Promise.all([
-      Donante.findOne({ email: normalizedEmail }),
-      Recolector.findOne({ email: normalizedEmail }),
+      Donante.findOne({ email: normalizedEmail, rolMigradoA: null }),
+      Recolector.findOne({ email: normalizedEmail, rolMigradoA: null }),
       Admin.findOne({ email: normalizedEmail }),
     ]);
     const cuenta = cuentas.find((item) => item && !item.confirmEmail);
@@ -100,10 +101,12 @@ const solicitarContactoAdmin = async (req, res) => {
 
 // La recuperación de contraseña desde la app sirve para donantes y recolectores.
 const findResetAccountByEmail = async (email) =>
-  (await Donante.findOne({ email })) || (await Recolector.findOne({ email }));
+  (await Donante.findOne({ email, rolMigradoA: null }))
+  || (await Recolector.findOne({ email, rolMigradoA: null }));
 
 const findResetAccountByToken = async (token) =>
-  (await Donante.findOne({ token })) || (await Recolector.findOne({ token }));
+  (await Donante.findOne({ token, rolMigradoA: null }))
+  || (await Recolector.findOne({ token, rolMigradoA: null }));
 
 const registro = async (req, res) => {
   try {
@@ -122,6 +125,12 @@ const registro = async (req, res) => {
       return res
         .status(400)
         .json({ msg: "Lo sentimos, debes llenar todos los campos" });
+    }
+    const mobileProfile = esMovil
+      ? validateMobileRegistrationProfile(req.body)
+      : { profile: {} };
+    if (mobileProfile.error) {
+      return res.status(400).json({ msg: mobileProfile.error });
     }
 
     const normalizedEmail = (email || "").trim().toLowerCase();
@@ -146,6 +155,7 @@ const registro = async (req, res) => {
       apellido,
       direccion: direccion ?? "",
       telefono: telefono ?? "",
+      ...mobileProfile.profile,
       email: normalizedEmail,
       rol: "donante",
       perfilCompleto: true,
@@ -182,12 +192,20 @@ const confirmarMail = async (req, res) => {
       return res.status(400).json({ msg: "Token inválido o malformado" });
     }
 
-    let user = await Donante.findOne({ token, confirmEmail: false });
+    let user = await Donante.findOne({
+      token,
+      confirmEmail: false,
+      rolMigradoA: null,
+    });
     if (!user) {
       user = await Admin.findOne({ token, confirmEmail: false });
     }
     if (!user) {
-      user = await Recolector.findOne({ token, confirmEmail: false });
+      user = await Recolector.findOne({
+        token,
+        confirmEmail: false,
+        rolMigradoA: null,
+      });
     }
 
     if (!user)
@@ -439,6 +457,15 @@ const actualizarPerfil = async (req, res) => {
   try {
     const { id } = req.params;
     const { nombre, apellido, direccion, telefono, email } = req.body || {};
+    const user = req.user || req.donanteHeader;
+    if (
+      String(user?.rol || "").toLowerCase() !== "donante"
+      || String(user?._id) !== String(id)
+    ) {
+      return res.status(403).json({
+        msg: "Solo puedes actualizar tu propio perfil de donante",
+      });
+    }
     if (!mongoose.Types.ObjectId.isValid(id))
       return res.status(400).json({ msg: `ID inválido: ${id}` });
 

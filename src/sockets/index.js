@@ -3,9 +3,8 @@ import jwt from "jsonwebtoken";
 import Donante from "../models/Donante.js";
 import Admin from "../models/Admin.js";
 import Recolector from "../models/Recolector.js";
-import ChatMessage from "../models/ChatMessage.js";
-import { canAccessRoom } from "../utils/chatRoom.js";
-import { isBlank } from "../utils/validation.js";
+import { canAccessRoom, emitToAuthorizedRoom } from "../utils/chatRoom.js";
+import { sendRoomMessage } from "../controllers/chat_controller.js";
 
 const JWT_SECRET =
   process.env.JWT_SECRET || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
@@ -77,12 +76,15 @@ const attachSocket = (server) => {
     socket.emit("connected", { ok: true, user: socket.data.user });
 
     socket.on("joinRoom", async ({ roomId } = {}) => {
-      const access = await canAccessRoom(socket.data.user, roomId);
-      if (!access.ok) {
-        return socket.emit("error", { msg: access.msg });
+      try {
+        const access = await canAccessRoom(socket.data.user, roomId, "read");
+        if (!access.ok) return socket.emit("error", { msg: access.msg, code: access.status });
+        socket.join(String(roomId));
+        return socket.emit("joinedRoom", { roomId: String(roomId) });
+      } catch (error) {
+        console.error("Socket joinRoom error:", error);
+        return socket.emit("error", { msg: "No se pudo abrir la conversación" });
       }
-      socket.join(roomId);
-      return socket.emit("joinedRoom", { roomId });
     });
 
     socket.on("leaveRoom", ({ roomId } = {}) => {
@@ -91,36 +93,34 @@ const attachSocket = (server) => {
       socket.emit("leftRoom", { roomId });
     });
 
-    socket.on("typing", ({ roomId } = {}) => {
-      if (!roomId) return;
-      socket.to(roomId).emit("typing", {
-        roomId,
-        user: socket.data.user,
-      });
+    socket.on("typing", async ({ roomId } = {}) => {
+      try {
+        const access = await canAccessRoom(socket.data.user, roomId, "write");
+        if (!access.ok) return socket.emit("error", { msg: access.msg, code: access.status });
+        await emitToAuthorizedRoom(
+          io,
+          roomId,
+          "typing",
+          { roomId: String(roomId), user: socket.data.user },
+          socket.id
+        );
+      } catch (error) {
+        console.error("Socket typing error:", error);
+        socket.emit("error", { msg: "No se pudo enviar el estado de escritura" });
+      }
     });
 
     socket.on("message", async ({ roomId, text } = {}) => {
-      if (isBlank(roomId) || isBlank(text)) {
-        return socket.emit("error", { msg: "roomId y text son requeridos" });
+      try {
+        const result = await sendRoomMessage(socket.data.user, roomId, text);
+        if (result.error) {
+          return socket.emit("error", { msg: result.error.msg, code: result.error.status });
+        }
+        return emitToAuthorizedRoom(io, roomId, "message", result.message);
+      } catch (error) {
+        console.error("Socket message error:", error);
+        return socket.emit("error", { msg: "Error al enviar el mensaje" });
       }
-
-      const access = await canAccessRoom(socket.data.user, roomId);
-      if (!access.ok) {
-        return socket.emit("error", { msg: access.msg });
-      }
-
-      const message = await ChatMessage.create({
-        room: roomId,
-        donacion: access.donacion?._id || null,
-        senderId: socket.data.user._id,
-        senderRol: socket.data.user.rol,
-        senderNombre: socket.data.user.nombre || "",
-        senderApellido: socket.data.user.apellido || "",
-        senderEmail: socket.data.user.email || "",
-        text: String(text).trim(),
-      });
-
-      return io.to(roomId).emit("message", message.toObject());
     });
   });
 

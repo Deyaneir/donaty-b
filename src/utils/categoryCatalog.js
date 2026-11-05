@@ -59,6 +59,8 @@ const resolveDonationCategory = async (
       categoriaId: category._id,
       campanaId: category.campana,
       subcategoria: "",
+      campos: category.campos || [],
+      maxUnidadesPorDonacion: category.maxUnidadesPorDonacion ?? null,
     };
   }
   if (typeof subcategorySelection !== "string") {
@@ -83,6 +85,8 @@ const resolveDonationCategory = async (
     categoriaId: category._id,
     campanaId: category.campana,
     subcategoria: subcategory.nombre,
+    campos: category.campos || [],
+    maxUnidadesPorDonacion: category.maxUnidadesPorDonacion ?? null,
   };
 };
 

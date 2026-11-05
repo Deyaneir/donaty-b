@@ -3,9 +3,21 @@ import Categoria from "../models/Categoria.js";
 import Campana from "../models/Campana.js";
 import Donacion from "../models/Donacion.js";
 import { normalizeCategoryName } from "../utils/categoryCatalog.js";
+import { normalizeFieldConfiguration } from "../utils/categoryFields.js";
 
 const validarClaveVisual = (value) =>
   value === "" || /^[a-zA-Z0-9_-]{1,64}$/.test(value);
+
+const normalizeMaximumUnits = (value) => {
+  if (value === undefined || value === null || value === "") return null;
+  const maximum = Number(value);
+  if (!Number.isInteger(maximum) || maximum < 1) {
+    const error = new Error("El límite de unidades debe ser un entero positivo o null");
+    error.statusCode = 400;
+    throw error;
+  }
+  return maximum;
+};
 
 const prepararSubcategorias = (value, existing = []) => {
   if (!Array.isArray(value)) {
@@ -67,17 +79,32 @@ const prepararSubcategorias = (value, existing = []) => {
   return [...merged.values()];
 };
 
-const validarDatosCategoria = ({ nombre, descripcion, iconKey, activa }) => {
+const validarDatosCategoria = ({
+  nombre,
+  descripcion,
+  formularioTitulo = "",
+  formularioDescripcion = "",
+  iconKey,
+  activa,
+}) => {
   if (
     typeof nombre !== "string" ||
     typeof descripcion !== "string" ||
+    typeof formularioTitulo !== "string" ||
+    typeof formularioDescripcion !== "string" ||
     typeof iconKey !== "string"
   ) {
     const error = new Error("Nombre, descripción e icono deben ser texto");
     error.statusCode = 400;
     throw error;
   }
-  if (!nombre || nombre.length > 80 || descripcion.length > 500) {
+  if (
+    !nombre ||
+    nombre.length > 80 ||
+    descripcion.length > 500 ||
+    formularioTitulo.length > 120 ||
+    formularioDescripcion.length > 500
+  ) {
     const error = new Error("El nombre es obligatorio y los campos deben respetar sus límites");
     error.statusCode = 400;
     throw error;
@@ -108,6 +135,9 @@ const crearCategoriaEnCampana = async (req, res, campaignId) => {
   try {
     const campana = await obtenerCampana(campaignId);
     const body = req.body || {};
+    if (Object.hasOwn(body, "campos") && Object.hasOwn(body, "fields")) {
+      return res.status(400).json({ msg: "Envía la configuración en campos o fields, no en ambos" });
+    }
     if (
       typeof body.nombre !== "string" ||
       (body.descripcion !== undefined && typeof body.descripcion !== "string") ||
@@ -118,6 +148,12 @@ const crearCategoriaEnCampana = async (req, res, campaignId) => {
     const datos = {
       nombre: body.nombre.trim(),
       descripcion: (body.descripcion ?? "").trim(),
+      formularioTitulo: (
+        body.formularioTitulo ?? body.tituloFormulario ?? ""
+      ).trim(),
+      formularioDescripcion: (
+        body.formularioDescripcion ?? body.descripcionFormulario ?? ""
+      ).trim(),
       iconKey: (body.iconKey ?? "").trim(),
       activa: body.activa ?? true,
     };
@@ -127,6 +163,8 @@ const crearCategoriaEnCampana = async (req, res, campaignId) => {
       campana: campana._id,
       nombreNormalizado: normalizeCategoryName(datos.nombre),
       subcategorias: prepararSubcategorias(body.subcategorias ?? []),
+      campos: normalizeFieldConfiguration(body.campos ?? body.fields ?? []),
+      maxUnidadesPorDonacion: normalizeMaximumUnits(body.maxUnidadesPorDonacion),
     });
 
     await Campana.updateOne(
@@ -174,8 +212,15 @@ const listarCategoriasDeCampana = async (req, res) => {
     if (rol !== "admin" && !campana.activa) {
       return res.status(404).json({ msg: "La campaña no existe o está inactiva" });
     }
-    const filtro = { campana: campana._id };
-    if (rol !== "admin") filtro.activa = true;
+    const assignedCategoryIds = campana.categoriasPermitidas || [];
+    const filtro = rol === "admin"
+      ? { campana: campana._id }
+      : {
+          activa: true,
+          ...(assignedCategoryIds.length
+            ? { _id: { $in: assignedCategoryIds } }
+            : { campana: campana._id }),
+        };
     const categorias = await Categoria.find(filtro).sort({ nombre: 1 }).lean();
     if (rol === "admin" && categorias.length > 0) {
       const counts = await Donacion.aggregate([
@@ -331,7 +376,7 @@ const listarDonacionesDeCategoria = async (req, res) => {
     }
 
     const donaciones = await Donacion.find(filter)
-      .select("_id campana categoria categoriaRef subcategoria descripcion tipo estado imagenUrl createdAt updatedAt")
+      .select("_id campana categoria categoriaRef subcategoria descripcion tipo estado imagenUrl metadata camposSnapshot createdAt updatedAt")
       .sort({ createdAt: -1 })
       .lean();
     return res.status(200).json({
@@ -369,7 +414,23 @@ const actualizarCategoria = async (req, res) => {
     }
 
     const body = req.body || {};
-    const allowedFields = ["nombre", "descripcion", "iconKey", "activa", "subcategorias"];
+    if (Object.hasOwn(body, "campos") && Object.hasOwn(body, "fields")) {
+      return res.status(400).json({ msg: "Envía la configuración en campos o fields, no en ambos" });
+    }
+    const allowedFields = [
+      "nombre",
+      "descripcion",
+      "formularioTitulo",
+      "tituloFormulario",
+      "formularioDescripcion",
+      "descripcionFormulario",
+      "iconKey",
+      "activa",
+      "subcategorias",
+      "campos",
+      "fields",
+      "maxUnidadesPorDonacion",
+    ];
     const providedFields = allowedFields.filter((field) => Object.hasOwn(body, field));
     if (!providedFields.length) return res.status(400).json({ msg: "Debes enviar al menos un campo" });
 
@@ -387,6 +448,27 @@ const actualizarCategoria = async (req, res) => {
       if (descripcion.length > 500) return res.status(400).json({ msg: "La descripción no puede superar 500 caracteres" });
       categoria.descripcion = descripcion;
     }
+    if (Object.hasOwn(body, "formularioTitulo") || Object.hasOwn(body, "tituloFormulario")) {
+      const titulo = body.formularioTitulo ?? body.tituloFormulario;
+      if (typeof titulo !== "string" || titulo.trim().length > 120) {
+        return res.status(400).json({ msg: "El título del formulario no es válido" });
+      }
+      categoria.formularioTitulo = titulo.trim();
+    }
+    if (
+      Object.hasOwn(body, "formularioDescripcion") ||
+      Object.hasOwn(body, "descripcionFormulario")
+    ) {
+      const descripcionFormulario =
+        body.formularioDescripcion ?? body.descripcionFormulario;
+      if (
+        typeof descripcionFormulario !== "string" ||
+        descripcionFormulario.trim().length > 500
+      ) {
+        return res.status(400).json({ msg: "La descripción del formulario no es válida" });
+      }
+      categoria.formularioDescripcion = descripcionFormulario.trim();
+    }
     if (Object.hasOwn(body, "iconKey")) {
       if (typeof body.iconKey !== "string") return res.status(400).json({ msg: "La clave visual debe ser texto" });
       const iconKey = body.iconKey.trim();
@@ -402,6 +484,12 @@ const actualizarCategoria = async (req, res) => {
         body.subcategorias,
         categoria.subcategorias
       );
+    }
+    if (Object.hasOwn(body, "campos") || Object.hasOwn(body, "fields")) {
+      categoria.campos = normalizeFieldConfiguration(body.campos ?? body.fields);
+    }
+    if (Object.hasOwn(body, "maxUnidadesPorDonacion")) {
+      categoria.maxUnidadesPorDonacion = normalizeMaximumUnits(body.maxUnidadesPorDonacion);
     }
 
     await categoria.save();

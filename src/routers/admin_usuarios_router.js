@@ -4,6 +4,7 @@ import requireRole from "../middlewares/requireRole.js";
 import {
   listarUsuarios,
   cambiarEstadoUsuario,
+  actualizarDatosUsuario,
 } from "../controllers/admin_usuarios_controller.js";
 
 const router = Router();
@@ -12,5 +13,6 @@ router.use(auth);
 
 router.get("/", requireRole("admin"), listarUsuarios);
 router.patch("/:rol/:id/estado", requireRole("admin"), cambiarEstadoUsuario);
+router.put("/:rol/:id", requireRole("admin"), actualizarDatosUsuario);
 
 export default router;

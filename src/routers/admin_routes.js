@@ -19,7 +19,10 @@ import {
   actualizarPasswordAdmin,
 } from "../controllers/admin_controller.js";
 import { confirmarMail } from "../controllers/donante_controller.js";
-import { getDashboardStats } from "../controllers/dashboard_controller.js";
+import {
+  getCampaignStats,
+  getDashboardStats,
+} from "../controllers/dashboard_controller.js";
 import { googleAdminMobileLogin } from "../controllers/google_controller.js";
 
 const router = Router();
@@ -41,6 +44,7 @@ router.get("/users", listarUsuarios);
 router.get("/recolectores", listarRecolectores);
 router.get("/perfil", perfilAdmin);
 router.get("/dashboard", getDashboardStats);
+router.get("/dashboard/campaign/:id", getCampaignStats);
 router.get("/users/:id", obtenerUsuario);
 router.put("/actualizarperfil/:id", actualizarPerfilAdmin);
 router.patch("/users/:id/role", actualizarRol);

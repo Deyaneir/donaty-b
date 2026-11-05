@@ -59,7 +59,7 @@ const verifyGoogleIdentity = async (idToken, audiences) => {
 const findOrCreateGoogleDonante = async ({ googleId, email, nombre, apellido }) => {
   const [adminExistente, recolectorExistente] = await Promise.all([
     Admin.findOne({ email }),
-    Recolector.findOne({ email }),
+    Recolector.findOne({ email, rolMigradoA: null }),
   ]);
   if (adminExistente || recolectorExistente) {
     const error = new Error("El email ya está registrado en otro rol");
@@ -69,6 +69,7 @@ const findOrCreateGoogleDonante = async ({ googleId, email, nombre, apellido }) 
 
   let user = await Donante.findOne({
     $or: [{ googleId }, { email }],
+    rolMigradoA: null,
   });
 
   if (!user) {

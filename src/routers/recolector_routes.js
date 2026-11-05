@@ -15,6 +15,9 @@ import {
   perfilRecolector,
   actualizarPerfilRecolector,
   actualizarPasswordRecolector,
+  actualizarUbicacionRecolector,
+  consultarUbicacionRecolector,
+  listarAsignacionesVigentesRecolector,
 } from "../controllers/recolector_controller.js";
 import { googleRecolectorMobileLogin } from "../controllers/google_controller.js";
 
@@ -36,6 +39,9 @@ router.get("/nuevopassword/:token", (_req, res) => {
 router.use(auth, requireRole("recolector"));
 
 router.get("/perfil", perfilRecolector);
+router.get("/asignaciones-vigentes", listarAsignacionesVigentesRecolector);
+router.get("/ubicacion", consultarUbicacionRecolector);
+router.post("/ubicacion", actualizarUbicacionRecolector);
 router.put("/actualizarperfil/:id", actualizarPerfilRecolector);
 router.put("/actualizarpassword/:id", actualizarPasswordRecolector);
 

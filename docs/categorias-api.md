@@ -6,7 +6,7 @@ Las rutas se montan con `app.use("/api", router)` en `src/server.js`; el router 
 
 | Metodo | Ruta | Acceso | Uso |
 | --- | --- | --- | --- |
-| GET | `/api/campanas/:campanaId/categorias` | Admin, donante, recolector | Lista categorias de esa campaña. Admin ve inactivas; los demás solo activas. |
+| GET | `/api/campanas/:campanaId/categorias` | Admin, donante, recolector | Admin ve categorias creadas en la campaña, incluidas las inactivas. Donantes y recolectores ven las categorias activas asignadas por `categoriasPermitidas`; si esa lista esta vacia, se usa el catalogo propio de la campaña. |
 | POST | `/api/campanas/:campanaId/categorias` | Admin | Crea una categoria perteneciente a esa campaña. |
 | GET | `/api/categorias?campana=:campanaId` | Publico | Compatibilidad: lista categorias activas de una campaña activa. |
 | GET | `/api/categorias/:id` | Admin, donante, recolector | Consulta el detalle de una categoria. |
@@ -14,7 +14,7 @@ Las rutas se montan con `app.use("/api", router)` en `src/server.js`; el router 
 | GET | `/api/categorias/:id/donaciones` | Admin, donante, recolector | Consulta historial filtrado por categoria y campaña, dentro del alcance del rol. |
 | GET | `/api/categorias/admin/lista` | Admin | Lista todas las categorias, incluidas las inactivas y legacy. |
 | POST | `/api/categorias` | Admin | Alternativa compatible; requiere `campana` en el JSON. |
-| PATCH | `/api/categorias/:id` | Admin | Actualiza nombre, descripcion, icono o estado. No permite moverla a otra campaña. |
+| PATCH | `/api/categorias/:id` | Admin | Actualiza nombre, descripcion, icono, estado, subcategorias o campos. No permite moverla a otra campaña. |
 | DELETE | `/api/categorias/:id` | Admin | Elimina solo cuando no tiene donaciones asociadas; si las tiene, devuelve `409`. |
 
 Las rutas de administracion requieren `Authorization: Bearer <access-token>` con rol `admin`.
@@ -35,12 +35,31 @@ Content-Type: application/json
   "nombre": "Ropa",
   "descripcion": "Prendas limpias y en buen estado",
   "iconKey": "shirt",
+  "campos": [
+    {
+      "key": "estado_empaque",
+      "label": "Estado del empaque",
+      "type": "dropdown",
+      "required": true,
+      "options": [
+        { "value": "sellado", "label": "Sellado" },
+        { "value": "abierto", "label": "Abierto" }
+      ],
+      "min": null,
+      "max": null,
+      "unit": "",
+      "order": 1,
+      "active": true
+    }
+  ],
   "subcategorias": [
     { "nombre": "Abrigos", "iconKey": "coat" },
     { "nombre": "Calzado" }
   ]
 }
 ```
+
+Los tipos permitidos son `shortText`, `longText`, `integer`, `decimal`, `date`, `dropdown`, `multiSelect`, `yesNo` y `unit`. `dropdown` y `multiSelect` requieren opciones `{ "value", "label" }`. `unit` sin opciones acepta un número y puede mostrar una unidad como sufijo; con opciones funciona como un campo de selección. La respuesta de consulta devuelve esta configuración en `campos`; al crear o editar también se acepta el alias `fields`, pero no se deben enviar ambos a la vez. Para editar se usa el mismo `PATCH /api/categorias/:id`; enviar `campos: []` elimina la configuración vigente para nuevas donaciones, sin modificar las anteriores.
 
 La campaña se toma del path. El campo `campana` no debe enviarse para cambiar la pertenencia de una categoria.
 
@@ -82,6 +101,23 @@ Respuesta `200`:
       "descripcion": "Prendas limpias y en buen estado",
       "iconKey": "shirt",
       "activa": true,
+      "campos": [
+        {
+          "key": "estado_empaque",
+          "label": "Estado del empaque",
+          "type": "dropdown",
+          "required": true,
+          "options": [
+            { "value": "sellado", "label": "Sellado" },
+            { "value": "abierto", "label": "Abierto" }
+          ],
+          "min": null,
+          "max": null,
+          "unit": "",
+          "order": 1,
+          "active": true
+        }
+      ],
       "subcategorias": [
         { "_id": "<subcategory-id>", "nombre": "Abrigos", "iconKey": "coat", "activa": true }
       ]
@@ -100,9 +136,17 @@ Donaciones nuevas pueden enviar el nombre o ID de la categoria. La subcategoria 
   "subcategoria": "<subcategory-id>",
   "descripcion": "Chaqueta en buen estado",
   "direccionEntrega": "Av. Ejemplo 123",
-  "telefonoContacto": "0990000000"
+  "telefonoContacto": "0990000000",
+  "metadata": {
+    "cantidad": 5,
+    "campos": {
+      "estado_empaque": "sellado"
+    }
+  }
 }
 ```
+
+En `multipart/form-data`, `metadata` se envía como texto JSON. El servidor valida `cantidad`, claves, tipos, obligatoriedad, opciones y límites contra los campos activos de la categoría; los campos desconocidos o inactivos se rechazan. Las categorías deben seguir activas y pertenecer a la campaña indicada. Donaciones antiguas con metadata que solo contiene `cantidad` siguen siendo legibles; cada donación nueva guarda además `camposSnapshot` con la configuración y los valores usados, y el historial de categoría devuelve ambos campos.
 
 La respuesta de donacion conserva `categoria` y `subcategoria` como nombres de texto e incluye `categoriaRef` para los registros nuevos. El campo historico `categoria` no cambia de tipo. Donantes consultan solo sus propias donaciones; recolectores consultan las asignadas o las que registraron; administradores consultan todas las de esa categoria.
 
@@ -124,7 +168,24 @@ Authorization: Bearer <access-token>
       "categoria": "Ropa",
       "categoriaRef": "<category-id>",
       "estado": "pendiente",
-      "descripcion": "Chaqueta en buen estado"
+      "descripcion": "Chaqueta en buen estado",
+      "metadata": {
+        "cantidad": 5,
+        "campos": { "estado_empaque": "sellado" }
+      },
+      "camposSnapshot": [
+        {
+          "key": "estado_empaque",
+          "label": "Estado del empaque",
+          "type": "dropdown",
+          "required": true,
+          "options": [
+            { "value": "sellado", "label": "Sellado" },
+            { "value": "abierto", "label": "Abierto" }
+          ],
+          "value": "sellado"
+        }
+      ]
     }
   ]
 }
@@ -143,7 +204,9 @@ Si hay donaciones asociadas, `DELETE /api/categorias/:id` responde `409` y conse
 }
 ```
 
-Para Flutter, usa `GET /api/campanas/:campanaId/categorias` como fuente de opciones; no infieras la pertenencia desde `categoriasPermitidas` únicamente.
+Para Flutter, usa `GET /api/campanas/:campanaId/categorias` como fuente de opciones. En el listado de campañas, `categoriasPermitidasNombres` contiene los nombres de las categorias activas asignadas para mostrarlos en las tarjetas; `categoriasPermitidas` conserva los identificadores.
+
+Las donaciones siguen representando una sola categoría y cantidad. Un payload de varios productos requiere acordar e implementar un contrato nuevo tanto en backend como en Flutter; este cambio no modifica esa estructura.
 
 ## Migracion opcional
 

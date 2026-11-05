@@ -9,6 +9,8 @@ import chatRoutes from "./chat_routes.js";
 import campanaRoutes from "./campana_routes.js";
 import campanaAdminRoutes from "./campana_admin_routes.js";
 import categoriaRoutes from "./categoria_routes.js";
+import notificationRoutes from "./notification_routes.js";
+import recolectorUbicacionRoutes from "./recolector_ubicacion_routes.js";
 
 const router = Router();
 
@@ -16,6 +18,7 @@ const router = Router();
 router.use("/donante", donanteRoutes);
 router.use("/admin", adminRoutes);
 router.use("/recolector", recolectorRoutes);
+router.use("/recolectores", recolectorUbicacionRoutes);
 router.use("/donacion", donacionRoutes);
 router.use("/donaciones-fisicas", donacionFisicaRoutes);
 router.use("/ai", aiRoutes);
@@ -24,6 +27,7 @@ router.use("/campanas", campanaRoutes);
 // Gestión de campañas del administrador (eliminar, conteos, donaciones).
 router.use("/campanas", campanaAdminRoutes);
 router.use("/categorias", categoriaRoutes);
+router.use("/notifications", notificationRoutes);
 
 
 export default router;
