@@ -2,6 +2,28 @@ import { Schema, model } from "mongoose";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
 
+const campaignScheduleReservationSchema = new Schema(
+  {
+    campana: { type: Schema.Types.ObjectId, ref: "Campana", required: true },
+    nombreCampana: { type: String, default: "" },
+    fechaInicio: { type: Date, default: null },
+    fechaFin: { type: Date, default: null },
+    horaInicio: { type: String, default: "" },
+    horaFin: { type: String, default: "" },
+    diasAtencion: [{ type: Number, min: 1, max: 7 }],
+    punto: {
+      _id: { type: Schema.Types.ObjectId, default: null },
+      nombre: { type: String, default: "" },
+      horariosAtencion: [{
+        diaSemana: { type: Number, min: 1, max: 7 },
+        horaInicio: { type: String },
+        horaFin: { type: String },
+      }],
+    },
+  },
+  { _id: false }
+);
+
 const recolectorSchema = new Schema(
   {
     nombre: { type: String, required: true, trim: true },
@@ -34,6 +56,22 @@ const recolectorSchema = new Schema(
     // Aprobación del administrador. Default true para no bloquear a los
     // recolectores que ya existían; los registros nuevos se crean en false.
     aprobado: { type: Boolean, default: true },
+    campanaReservada: {
+      type: Schema.Types.ObjectId,
+      ref: "Campana",
+      default: null,
+      index: true,
+    },
+    reservasHorarioCampanas: {
+      type: [campaignScheduleReservationSchema],
+      default: [],
+    },
+    versionReservasHorario: {
+      type: Number,
+      min: 0,
+      default: 0,
+      select: false,
+    },
     token: { type: String, default: null },
     tokenExpires: { type: Date, default: null },
     ubicacionGps: {

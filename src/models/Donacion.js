@@ -19,11 +19,6 @@ const donanteExternoSchema = new Schema(
     },
     latitud: { type: Number, min: -90, max: 90, default: null },
     longitud: { type: Number, min: -180, max: 180, default: null },
-    direccion: {
-      type: String,
-      trim: true,
-      default: "",
-    },
   },
   { _id: false }
 );
@@ -62,6 +57,7 @@ const historialRecolectorSchema = new Schema(
     recolectorNuevo: { type: Schema.Types.ObjectId, ref: "Recolector", default: null },
     puntoRecoleccionAnterior: { type: Schema.Types.ObjectId, default: null },
     puntoRecoleccionNuevo: { type: Schema.Types.ObjectId, default: null },
+    estado: { type: String, default: null },
     administrador: { type: Schema.Types.ObjectId, ref: "Admin", default: null },
     fecha: { type: Date, required: true, default: Date.now },
     motivo: { type: String, default: "", trim: true, maxlength: 500 },
@@ -72,6 +68,11 @@ const historialRecolectorSchema = new Schema(
 const evidenciaSchema = new Schema(
   {
     etapa: { type: String, enum: ["recepcion", "finalizacion", "devolucion"], required: true },
+    operacion: {
+      type: String,
+      enum: ["solicitarDevolucion", "confirmarDevolucion"],
+      default: undefined,
+    },
     recolector: { type: Schema.Types.ObjectId, ref: "Recolector", required: true },
     fecha: { type: Date, required: true, default: Date.now },
     imagenUrl: { type: String, required: true },
@@ -79,6 +80,34 @@ const evidenciaSchema = new Schema(
     idempotencyKey: { type: String, required: true },
   },
   { _id: false }
+);
+
+const productoClasificadoSchema = new Schema(
+  {
+    categoria: { type: String, required: true, trim: true, maxlength: 160 },
+    producto: { type: String, required: true, trim: true, maxlength: 160 },
+    nombreBien: { type: String, required: true, trim: true, maxlength: 255 },
+    cantidad: { type: Number, min: 1, default: null },
+    recolector: { type: Schema.Types.ObjectId, ref: "Recolector", required: true },
+    fecha: { type: Date, required: true, default: Date.now },
+  },
+  { _id: true }
+);
+
+const entregaSchema = new Schema(
+  {
+    nombresReceptor: { type: String, required: true, trim: true, maxlength: 120 },
+    apellidosReceptor: { type: String, required: true, trim: true, maxlength: 120 },
+    telefonoReceptor: { type: String, required: true, trim: true, maxlength: 20 },
+    cargoReceptor: { type: String, required: true, trim: true, maxlength: 120 },
+    descripcionBienes: { type: String, required: true, trim: true, maxlength: 2000 },
+    recolector: { type: Schema.Types.ObjectId, ref: "Recolector", required: true },
+    fecha: { type: Date, required: true, default: Date.now },
+    imagenUrl: { type: String, required: true },
+    imagenPublicId: { type: String, required: true },
+    idempotencyKey: { type: String, required: true },
+  },
+  { timestamps: false }
 );
 
 const ubicacionRecoleccionSchema = new Schema(
@@ -136,9 +165,21 @@ const donacionSchema = new Schema(
       default: null,
       index: true,
     },
+    periodoAcademico: {
+      type: String,
+      default: null,
+      trim: true,
+      index: true,
+    },
     puntoRecoleccionRef: {
       type: Schema.Types.ObjectId,
       default: null,
+    },
+    clasificacionId: {
+      type: Schema.Types.ObjectId,
+      ref: "Clasificacion",
+      default: null,
+      index: true,
     },
     fechaAsignacion: {
       type: Date,
@@ -274,6 +315,8 @@ const donacionSchema = new Schema(
     historialEstados: { type: [historialEstadoSchema], default: [] },
     historialRecolectores: { type: [historialRecolectorSchema], default: [] },
     evidencias: { type: [evidenciaSchema], default: [] },
+    productosClasificados: { type: [productoClasificadoSchema], default: [] },
+    entregas: { type: [entregaSchema], default: [] },
   },
   {
     timestamps: true,

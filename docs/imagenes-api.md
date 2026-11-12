@@ -6,19 +6,23 @@ El análisis en `POST /api/donacion/analizar-imagen` solo usa y elimina su archi
 
 Cada donación admite actualmente una imagen. El archivo temporal empleado para el análisis y la evidencia permanente de Cloudinary son independientes: borrar el temporal no elimina la evidencia.
 
-Los endpoints existentes conservan sus URLs. Para enviar una imagen, usa `multipart/form-data`, conserva los campos actuales como partes de formulario y agrega opcionalmente un archivo llamado `imagen`.
+`POST /api/donacion/analizar-imagen` no guarda ni bloquea una imagen ya analizada. Para volver a analizar la misma fotografía, adjunta nuevamente el archivo original en `imagen` junto con `campanaId`; cada llamada devuelve sugerencias y no crea una donación.
+
+Los endpoints existentes conservan sus URLs. Para enviar una imagen, usa `multipart/form-data`, conserva los campos actuales como partes de formulario y agrega un archivo llamado `imagen` cuando la ruta lo requiera.
 
 | Metodo | Endpoint | Imagen |
 | --- | --- | --- |
 | POST | `/api/campanas` | Opcional `imagen` |
 | PATCH | `/api/campanas/:id` | Opcional `imagen`; si se omite, conserva la imagen actual |
-| POST | `/api/donacion` | Opcional `imagen` |
-| POST | `/api/donacion/registrar-por-recolector` | Opcional `imagen` |
+| POST | `/api/donacion` | Obligatoria `imagen` |
+| POST | `/api/donacion/registrar-por-recolector` | Obligatoria `imagen` |
 | PATCH | `/api/donacion/:id` | Opcional `imagen`; reemplaza la imagen actual |
 
 Las rutas conservan sus permisos y sus campos de texto existentes. En actualizaciones, no enviar `imagen` deja intacta la imagen actual. Al reemplazarla, se elimina de Cloudinary la imagen anterior después de guardar correctamente el documento. Las eliminaciones existentes de donaciones también eliminan su imagen asociada.
 
 Se aceptan JPG, PNG y WebP hasta 5 MB. El servidor usa las credenciales ya configuradas por `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY` y `CLOUDINARY_API_SECRET`, almacenando los archivos en `donaty/campanas` y `donaty/donaciones`. La respuesta del recurso contiene `imagenUrl` y `imagenPublicId`; el cliente debe mostrar `imagenUrl` y no debe modificar `imagenPublicId`. Si falla la creación de la donación después de subir la foto, el backend intenta eliminar el archivo recién subido para evitar huérfanos.
+
+Las URLs seguras absolutas de Cloudinary se devuelven sin cambios. Para normalizar URLs históricas relativas, HTTP o locales en las respuestas de evidencia, configura `PUBLIC_BASE_URL` con el origen HTTPS público del backend. La subida de evidencias acepta como máximo dos archivos por operación; el tipo y el límite de 5 MB se validan antes de subir cada archivo.
 
 Ejemplo cURL de creación de donación (mantén el resto de campos que exige tu flujo):
 

@@ -3,6 +3,8 @@ import CollectorLocationSimulation from "../models/CollectorLocationSimulation.j
 import { isInsideEpnCampus } from "../utils/epnCampusGeofence.js";
 import { classifyCollectorGeofenceState } from "../utils/collectorLocation.js";
 import { isCollectorLocationSimulatorEnabled } from "../utils/devCollectorLocationSimulator.js";
+import { isQaGeofenceOverrideAllowed } from "../utils/qaGeofence.js";
+import { selectLatestCollectorLocation } from "../utils/collectorLocationSource.js";
 
 const LOCATION_ERRORS = {
   sin_registro: {
@@ -43,10 +45,13 @@ const requireCollectorGeofence = async (req, res, next) => {
           expiresAt: { $gt: new Date() },
         }).lean()
       : null;
-    const gps = simulation ?? collector?.ubicacionGps;
+    const { location: gps, simulated } = selectLatestCollectorLocation(
+      collector?.ubicacionGps,
+      simulation
+    );
     const state = classifyCollectorGeofenceState({
       collectorActive: collector?.status !== false,
-      capturedAt: gps?.capturadoEn ?? gps?.capturedAt ?? gps?.actualizadoEn,
+      capturedAt: gps?.capturadoEn ?? gps?.capturedAt,
       latitude: gps?.latitud ?? gps?.latitude,
       longitude: gps?.longitud ?? gps?.longitude,
       accuracyMeters: gps?.precisionMetros ?? gps?.accuracyMeters,
@@ -58,7 +63,10 @@ const requireCollectorGeofence = async (req, res, next) => {
           && isInsideEpnCampus(gps.latitude, gps.longitude)),
     });
 
-    if (state !== "dentro") {
+    const qaOverride =
+      state === "fuera"
+      && isQaGeofenceOverrideAllowed(user);
+    if (state !== "dentro" && !qaOverride) {
       const error = LOCATION_ERRORS[state] ?? LOCATION_ERRORS.sin_registro;
       return res.status(state === "inactivo" ? 403 : 409).json({
         ...error,
@@ -68,11 +76,18 @@ const requireCollectorGeofence = async (req, res, next) => {
 
     req.collectorGeofence = {
       state,
-      capturedAt: gps.capturadoEn ?? gps.capturedAt ?? gps.actualizadoEn,
+      qaOverride,
+      realState: state,
+      capturedAt: gps.capturadoEn ?? gps.capturedAt,
       campaignId: gps.campana ?? gps.campaign,
       pointId: gps.puntoRecoleccion ?? gps.point,
-      simulated: Boolean(simulation),
+      simulated,
     };
+    if (qaOverride) {
+      console.warn(
+        `QA geofence bypass applied to allowlisted collector ${String(user._id)}`
+      );
+    }
     return next();
   } catch (error) {
     console.error("Error validando la ubicación del recolector:", error.message || error);

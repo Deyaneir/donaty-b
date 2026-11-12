@@ -26,6 +26,10 @@ Los administradores pueden crear o editar `puntosRecoleccion` en las operaciones
 }
 ```
 
+`POST /api/campanas` acepta `multipart/form-data` con `nombre`, `descripcion`, `ubicacion`, `fechaInicio`, `fechaFin`, `periodoAcademico`, `diasAtencion` (lista JSON), `horaInicio`, `horaFin`, `numeroRecolectores`, `metaDonaciones` y `activa`. Los valores numéricos y booleanos pueden enviarse como texto multipart; `activa` debe ser `false` al crear porque las campañas se guardan como borrador y se activan después. `imagen` es opcional; si se omite, la campaña se crea sin imagen de portada. La creación responde `201` con `{ msg, campana, disponibilidad }`.
+
+Después de crear la campaña, cada punto se puede agregar mediante `POST /api/campanas/:campaignId/puntos` como JSON. La respuesta `201` contiene `{ campanaId, punto, totalPuntos }`.
+
 También se exponen las operaciones administrativas:
 
 - `GET /api/campanas/:campanaId/puntos` — administrador ve todos los puntos (incluidos inactivos); donante y recolector autenticados ven solo puntos activos de campañas activas. Responde `{ "campanaId": "...", "totalPuntos": 1, "puntos": [...] }`; cada elemento incluye `_id`, `id`, `campanaId`, `nombre`, `descripcion`, `direccion`, `referenciasLugar`, `telefonoContacto`, `latitud`, `longitud`, `latitude`, `longitude` y `estado`. `edificio`, `piso` y `aula` son cadenas vacías para registros antiguos que no los tengan. Los puntos embebidos permanecen almacenados en el documento campaña.
@@ -38,6 +42,16 @@ También se exponen las operaciones administrativas:
 Los puntos se guardan embebidos en el documento `Campana`; no hay una colección/modelo independiente. `nombre` es obligatorio (si no llega, se deriva de datos reales edificio/nombre de edificio/aula). Descripción, dirección, referencias y coordenadas se persisten cuando las envía el cliente; para puntos creados por el formulario actual que no mande esos campos, el backend devuelve texto vacío o coordenadas `null`, no inventa valores. Latitud/longitud deben llegar juntas y dentro de rangos geográficos válidos.
 
 La respuesta de consulta de campaña conserva los datos del punto para donantes y recolectores, pero no expone IDs de recolectores ni el historial administrativo de asignaciones. Los administradores pueden consultarlos en la distribución.
+
+## Fechas, horario y disponibilidad de campañas
+
+`fechaInicio` y `fechaFin` siguen siendo campos BSON `Date` (sin migración ni campos nuevos) y representan días calendario, no instantes de apertura/cierre. `horaInicio` y `horaFin` son horas diarias `HH:mm` que se repiten en cada día del rango inclusivo. La campaña abre en la fecha inicial a `horaInicio` y cierra en la fecha final a `horaFin`; por ejemplo, del 5 al 8 de noviembre, de 09:00 a 17:00, queda disponible cada uno de esos cuatro días de 09:00 a 17:00.
+
+Las fechas recibidas en el formato existente (`YYYY-MM-DD` o ISO con fecha) se guardan como medianoche UTC para preservar el día calendario enviado. Los registros existentes conservan sus valores y se interpretan por su componente de fecha UTC; no se ejecuta migración. Los registros antiguos con fechas y horas válidas siguen funcionando; un horario faltante o inválido no se considera disponible hasta que se corrija.
+
+La disponibilidad se calcula con `America/Guayaquil`, con límites inclusivos: antes de inicio o después de cierre no se puede seleccionar la campaña ni registrar donaciones. `fechaFin` anterior a `fechaInicio` se rechaza; ambos días pueden ser iguales si las horas son válidas y `horaFin` es posterior. Las horas deben ser `HH:mm` y `horaFin` debe ser posterior a `horaInicio`.
+
+El filtro aplica a `GET /api/campanas` para donantes/recolectores, las consultas de categorías y subcategorías, y el registro de donaciones, con nueva comprobación dentro de la transacción de asignación. La respuesta para administradores mantiene su visibilidad actual. La campaña se considera finalizada para estas reglas después de su hora de cierre en Ecuador.
 
 ## Recolectores disponibles y distribución
 
@@ -84,51 +98,81 @@ Respuesta `200`:
 }
 ```
 
-- `GET /api/campanas/:campaignId/distribucion-recolectores` — solo administrador. Devuelve `campanaId`, cada punto con sus recolectores autorizados y responsable vigente, y `historialAsignaciones` ordenado cronológicamente. Cada entrada contiene recolector, campaña, punto anterior/nuevo, administrador, fecha, motivo y `vigente`.
+- `GET /api/campanas/:campaignId/distribucion-recolectores` — administrador o recolector asignado actualmente. El administrador recibe la distribución completa e historial ordenado cronológicamente. El recolector recibe solo sus puntos activos, con ubicación, responsable principal y el equipo asignado a cada uno; no recibe otros puntos ni sus responsables. Devuelve `campanaId` y `puntos`; cada punto contiene `responsableRecolector` y `recolectores`, ambos con `_id`, `nombre`, `apellido` y `rolPunto` (`principal` o `apoyo`). El principal figura en el equipo aunque no se repita en la lista persistida de secundarios.
+- Las asignaciones de principal y apoyos quedan registradas con fecha del servidor al crear el punto (`POST /api/campanas/:campaignId/puntos`), al crearlo junto con la campaña, o al cambiar recolectores en el punto. La ruta existente de distribución devuelve esa fecha como `historialAsignaciones[].fecha`. Las asignaciones antiguas sin fecha persistida no se reconstruyen ni se les asigna una fecha estimada.
+- `GET /api/campanas/historial` para un donante usa el ID del usuario autenticado y devuelve solo campañas vinculadas a sus donaciones; cada elemento incluye `_id`, `nombre`, `estado`, `fechaInicio`, `fechaFin`, `periodoAcademico` e `imagenUrl`. Administradores y recolectores conservan su propio alcance de historial. En el historial de recolectores, las asignaciones vigentes sin historial persistido se indican con `fuente: "asignacion_vigente"` y `fecha: null`; incluyen recolector, punto y rol principal/secundario.
+- Los donantes pueden consultar campañas activas/disponibles y campañas cerradas o inactivas donde tengan donaciones propias. La portada `imagenUrl` se conserva en las respuestas de campañas e historial. Categorías y subcategorías históricas se conservan para consultar las donaciones existentes; esto no habilita nuevos registros.
+- Los avisos de asignación usan los dispositivos registrados en `PUT /api/notifications/device`. El payload de datos incluye `type: "collector_point_assignment"`, `campaignId`/`campanaId`, `campaignName`, `pointId`/`puntoRecoleccionId`, `pointName`, `principalId`, `principalNombre`, `principalApellido`, `recolectores` (JSON con `_id`, `nombre`, `apellido`, `rolPunto`) y `rolPunto` del destinatario. La notificación también incluye `title` y `body` para primer plano; el envío informa `sent` solo si FCM no reporta fallos.
 - `PUT /api/campanas/:campaignId/puntos/:pointId/reasignar` — solo administrador. Mueve o asigna explícitamente un recolector (no redistribuye los demás):
 
 ```json
-{ "recolectorId": "RECOLECTOR_ID", "motivo": "Cambio solicitado" }
+{ "recolectorId": "RECOLECTOR_ID", "rol": "principal", "motivo": "Cambio solicitado" }
 ```
 
-Valida que el punto pertenezca a la campaña, esté activo y tenga capacidad. Devuelve `campanaId`, `punto`, `recolector` e `historialAsignaciones`. Las asignaciones anteriores se conservan; solo se marca la vigente como tal.
+`rol` admite `principal` o `apoyo`; se puede omitir para conservar el comportamiento anterior. Para sustituir a un recolector y transferir sus donaciones, enviar también `recolectorAnteriorId` con el ID del recolector asignado actualmente al mismo punto. La operación conserva estados y evidencias, registra el cambio en los historiales de campaña y donaciones, y libera la reserva del recolector anterior. Cada punto conserva un solo `responsableRecolector` principal. Designar uno nuevo sin indicar `recolectorAnteriorId` conserva el comportamiento anterior; cambiar el principal a apoyo exige que haya otro recolector para promover. Un apoyo no puede registrar la entrega general.
 
-## Ubicación GPS
-
-- `GET /api/recolector/asignaciones-vigentes` — solo recolector autenticado. Devuelve sus puntos activos asignados, con campaña, edificio, piso, aula, dirección y referencias. El móvil usa los IDs devueltos para actualizar GPS; no selecciona un punto ni un recolector aleatoriamente.
-- `POST /api/recolectores/ubicacion` — solo recolector. El usuario autenticado debe estar asignado al punto activo de una campaña activa:
+Los responsables no recolectores de una campaña se configuran por separado en `POST /api/campanas` o `PATCH|PUT /api/campanas/:id`, con `responsablesCampana`:
 
 ```json
 {
-  "campanaId": "CAMPANA_ID",
-  "puntoRecoleccionId": "PUNTO_ID",
-  "latitud": -0.210145,
-  "longitud": -78.488712,
-  "precisionMetros": 8.5
+  "responsablesCampana": [
+    { "nombreCompleto": "Nombre Apellido", "cargo": "Coordinación" }
+  ]
 }
 ```
 
-El servidor vuelve a validar la asignación y el geofence del polígono real de la EPN (OpenStreetMap way `31135336`, ODbL 1.0), y rechaza precisiones superiores a 50 m. Una ubicación fuera del polígono responde `403` con código `OUTSIDE_EPN_GEOFENCE`; una precisión insuficiente responde `422` con código `LOCATION_ACCURACY_INSUFFICIENT`. La API no reasigna recolectores automáticamente. La respuesta `200` contiene `ubicacion` con IDs, coordenadas, `precisionMetros` y `actualizadoEn`.
+La campaña almacena uno o varios nombres completos y cargos, sin valores predeterminados. Se conservan separados de los recolectores principales, los de apoyo y quien registra la entrega.
 
-- `GET /api/campanas/:campaignId/ubicaciones-recolectores` — solo administrador. Devuelve `ubicaciones`; cada elemento contiene recolector, punto, `estado` (`activo`, `inactivo` o `desactualizado`), coordenadas y `actualizadoEn`. Un recolector asignado puede estar `activo` si la ubicación corresponde a su campaña/punto actual; después de 5 minutos el GPS es `desactualizado` y las coordenadas se omiten. Ubicaciones antiguas no se presentan como actuales.
+Valida que el punto pertenezca a la campaña, esté activo y tenga capacidad. Devuelve `campanaId`, `punto`, `recolector`, `rol` e `historialAsignaciones`. Las asignaciones anteriores se conservan; solo se marca la vigente como tal.
+
+## Ubicación GPS
+
+- `GET /api/recolector/asignaciones-vigentes` — solo recolector autenticado. En cada elemento de `items`, `fechaAsignacion` contiene la fecha/hora real en ISO 8601; el móvil debe leer `items[].fechaAsignacion` y mostrarla en hora local. Para asignaciones antiguas sin fecha persistida, el valor es `null`; no se inventa la fecha. El móvil usa los IDs devueltos para actualizar GPS; no selecciona un punto ni un recolector aleatoriamente.
+- Cuando `PATCH /api/campanas/:id` agrega o mueve recolectores al editar puntos, el backend registra la fecha/hora exacta del cambio en el historial. Editar otros datos o reenviar sin cambios la misma asignación no crea una fecha nueva.
+- `GET /api/recolectores/ubicacion` — solo recolector autenticado. Devuelve la última ubicación del propio recolector, sus coordenadas, fecha de captura (`capturadoEn`) y fecha de recepción (`actualizadoEn`). Una captura antigua conserva su fecha original; no se sustituye por la fecha de recepción.
+- `GET /api/recolectores/:collectorId/ubicacion` — administrador o el mismo recolector. Consulta la última posición guardada para ese recolector; otro recolector recibe `403`. Cada `POST` guarda también un registro de historial con la fecha original `capturadoEn` y la fecha de recepción del servidor.
+- `POST /api/recolectores/ubicacion` — solo recolector autenticado. Registra la ubicación del token autenticado sin requerir campaña, punto ni pertenencia al geofence:
+
+```json
+{
+  "latitud": -0.210145,
+  "longitud": -78.488712,
+  "precisionMetros": 8.5,
+  "capturadoEn": "2026-11-06T14:30:00.000Z"
+}
+```
+
+Las coordenadas son obligatorias y deben estar dentro de los rangos de latitud y longitud. `precisionMetros` y `capturadoEn` son opcionales; si se envían, deben tener formato válido. `capturadoEn` conserva la hora de captura del dispositivo y `actualizadoEn` registra la recepción del servidor. Una ubicación fuera del área también se guarda y consulta, pero no concede permiso para operar.
+
+El guard geográfico sigue aplicándose a las operaciones de recolector que requieren presencia física (por ejemplo, registrar donaciones, cambiar su estado o subir evidencias). Para esas operaciones se valida que la ubicación sea reciente, precisa y esté dentro del polígono real de la EPN (OpenStreetMap way `31135336`, ODbL 1.0); la separación de este endpoint no elimina esas validaciones. La API no reasigna recolectores automáticamente.
+
+- `GET /api/campanas/:campaignId/ubicaciones-recolectores` — solo administrador. Devuelve `ubicaciones`; cada elemento contiene recolector, punto, `estado` (`activo`, `inactivo` o `desactualizado`), coordenadas y `actualizadoEn`. Un recolector asignado puede estar `activo` si la ubicación corresponde a su campaña/punto actual; después de 5 minutos el GPS es `desactualizado` y las coordenadas se omiten. Ubicaciones antiguas no se presentan como actuales. Las coordenadas del recolector son independientes de las coordenadas fijas del punto.
 
 ## Consulta de trazabilidad QR
 
 - `POST /api/donacion/qr` — administrador, donante autenticado o recolector autenticado.
 - Cuerpo: `{ "codigo": "DONATY:DONACION_ID" }`.
 - Un donante solo consulta sus propias donaciones; un recolector solo las que tiene asignadas; el administrador puede consultar cualquiera. El acceso no autorizado responde `403`.
-- Respuesta `200`: `donacion`, `puntoRecoleccion`, `recolectoresAsignadosAlPunto`, `responsableVigente`, `ubicacionResponsable`, `historialEstados`, `historialRecolectores` y `evidenciasPorEtapa`.
+- Respuesta `200`: `donacion`, `entregaGeneralCampana`, `puntoRecoleccion`, `recolectoresAsignadosAlPunto`, `responsableVigente`, `ubicacionResponsable`, `historialEstados`, `historialRecolectores` y `evidenciasPorEtapa`. Las evidencias se agrupan por etapa y responsable: cada grupo contiene `responsable: { nombre, apellido }` y `fotografias: [{ imagenUrl, fecha }]`; no se devuelve el ID del recolector ni el ID interno de la foto.
+- El QR existente usa `DONATY:` seguido del `_id` original; el detalle devuelve ese identificador y no crea códigos nuevos.
+- `GET /api/donacion/mis` también agrega `entregaGeneralCampana` a cada donación del donante. Antes de registrar la entrega, devuelve `registrada: false` y un mensaje controlado. Cuando existe, devuelve receptor, fecha, responsables/cargos y URLs persistentes de evidencias, pero nunca el inventario consolidado ni la trazabilidad de otros donantes.
 - `puntoRecoleccion` incluye identificador, nombre, edificio, piso, aula, dirección y referencias existentes en el punto.
 - Los historiales se devuelven cronológicamente. El historial de estados comienza con las transiciones registradas desde esta versión; los registros históricos no se reconstruyen ni se inventan.
 - `ubicacionResponsable` informa `estado`, `coordenadas` y `actualizadoEn`. Coordenadas se devuelven solo cuando la ubicación corresponde a la campaña y punto de la donación y tiene menos de 5 minutos.
 
 ## Evidencias fotográficas
 
-- `POST /api/donacion/:id/evidencias` — solo recolector asignado. `multipart/form-data` con `etapa` (`recepcion`, `finalizacion` o `devolucion`) y archivo `imagen`.
-- Encabezado obligatorio: `Idempotency-Key` (máximo 128 caracteres).
+- `PATCH /api/donacion/:id/recolectar` — solo recolector asignado. `multipart/form-data` con una o varias fotos en `imagen`, `imagenes` o `evidencias`. La transición a `recolectada` se guarda junto con todas las evidencias; si alguna carga o persistencia falla, no cambia el estado.
+- `POST /api/donacion/:id/evidencias` — solo recolector asignado. `multipart/form-data` con `etapa` (`recepcion`, `finalizacion` o `devolucion`) y de una a dos fotos en `imagen`, `imagenes` o `evidencias`.
+- Clave obligatoria: `Idempotency-Key` (encabezado) o `idempotencyKey` (campo de formulario), máximo 128 caracteres.
 - La etapa debe ser compatible con el estado actual: recepción (`pendiente_recoleccion` o `recolectada`), finalización (`entregada`) o devolución (`devolucion` o `devuelta`). La asignación y el estado se vuelven a comprobar al guardar.
-- Las imágenes JPG, PNG y WebP tienen un máximo de 5 MB y se almacenan en Cloudinary. La falta de una foto no bloquea ni cambia las rutas de transición de estado existentes.
-- Respuesta `201` contiene `evidencia`, `evidenciasPorEtapa` y `duplicada: false`. Un reintento con la misma clave devuelve `200`, la evidencia ya guardada y `duplicada: true`; no crea otro registro.
+- `PATCH /api/donacion/:id/devolucion` y `PATCH /api/donacion/:id/confirmar-devolucion` también aceptan `multipart/form-data` con `etapa=devolucion`, `idempotencyKey` y hasta dos imágenes en `evidencias`; cambian el estado y guardan las imágenes en la donación identificada por `:id`.
+- Las imágenes JPG, PNG y WebP tienen un máximo de 5 MB y se almacenan en Cloudinary. El endpoint auxiliar no cambia el estado; cada transición conserva sus propios requisitos de evidencia.
+- La clave idempotente se aplica a todas las fotos de una misma solicitud. Respuesta `201` contiene `evidencia` (grupos de fotos de la etapa), `evidencias` y `evidenciasPorEtapa`, agrupadas por responsable con su nombre una sola vez, y `duplicada: false`. Un reintento con la misma clave devuelve `200` con los mismos grupos y `duplicada: true`; no crea otros registros.
+
+## Campañas visibles para recolectores
+
+`GET /api/campanas` para recolectores excluye borradores, campañas desactivadas/finalizadas y campañas fuera de sus fechas de participación; solo devuelve puntos activos con asignación vigente del recolector. `POST /api/donacion/registrar-por-recolector` aplica el mismo control de disponibilidad. La consulta de administrador no cambia.
 
 ## Cantidad por categoría
 
@@ -142,7 +186,7 @@ La selección minimiza primero la carga más alta entre el punto y el recolector
 
 El teléfono del donante se lee del perfil y se guarda como snapshot en `telefonoContacto`; si falta, responde `400` pidiendo completar el perfil. No se usa un teléfono del body. La ubicación opcional recibida se puede guardar aparte, pero nunca interviene en la selección de punto o recolector.
 
-La respuesta conserva `{ "donacion": ... }` e incluye `asignacion` con el punto, recolector y fecha elegidos. La donación incluye además `recolector`, `puntoRecoleccionRef`, `fechaAsignacion`, `fechaRegistro`, `telefonoContacto`, `direccionEntrega` e `historialRecolectores`. Las donaciones registradas por recolectores para donantes externos mantienen su flujo anterior.
+La respuesta conserva `{ "donacion": ... }` e incluye `asignacion` con el punto, recolector y fecha elegidos. La donación incluye además `recolector`, `puntoRecoleccionRef`, `fechaAsignacion`, `fechaRegistro`, `telefonoContacto`, `direccionEntrega` e `historialRecolectores`. `POST /api/donacion/registrar-por-recolector` usa la misma asignación dentro del punto elegido, guarda por separado `registradoPorRecolector` y el recolector finalmente asignado, y devuelve también `asignacion`.
 
 Al completar el registro, el backend envía una notificación al recolector elegido, además de la notificación administrativa existente.
 
@@ -179,7 +223,29 @@ Ejemplo de respuesta del registro:
 }
 ```
 
-`PATCH /api/donaciones-fisicas/:id/admin-asignar` mantiene la reasignación administrativa existente. Para donaciones vinculadas a campaña, el recolector destino debe estar asignado al mismo punto. La ruta registra recolector/punto anterior y nuevo y actualiza `fechaAsignacion`; los conteos de carga se derivan de las donaciones no finalizadas, por lo que reasignar actualiza las cargas sin contadores duplicados.
+`PATCH /api/donaciones-fisicas/:id/admin-asignar` permite asignar una donación pendiente y reasignar donaciones en `asignada`, `pendiente_recoleccion` o `recolectada`. Para donaciones vinculadas a campaña, el recolector destino debe estar asignado al mismo punto. La ruta registra recolector/punto anterior y nuevo, fecha y estado de la donación sin retroceder su estado. Así, una donación `recolectada` conserva al recolector registrado en `historialEstados` como responsable de la recolección y queda asignada al nuevo responsable de la clasificación. Los conteos de carga se derivan de las donaciones no finalizadas, por lo que reasignar actualiza las cargas sin contadores duplicados.
+
+## Entrega general consolidada por campaña
+
+- `POST /api/campanas/:campanaId/entrega` — requiere autenticación como recolector principal habilitado de un punto de esa campaña. Acepta JSON:
+
+```json
+{
+  "recibeNombre": "Ana Ejemplo",
+  "recibeIdentificacion": "1234567890",
+  "recibeInstitucion": "Centro de acogida",
+  "fecha": "2026-11-11",
+  "observacion": "Entrega de los bienes recolectados"
+}
+```
+
+- El servidor verifica que la campaña haya finalizado, que tenga donaciones y que todas estén en `en_entrega`. Un usuario de apoyo, transición inválida o entrega duplicada recibe un error claro. No se requiere una configuración de responsables de campaña. El registro único por campaña y los cambios de estado se guardan en la misma transacción; cada donación se actualiza por ID.
+- El documento `EntregaCampana` conserva el principal que registró la entrega, datos del receptor, fecha y observación. `GET /api/campanas/:campanaId/entrega` acepta al principal que la registró o a un administrador y responde `{ entrega, campana, tablas }`. Cada tabla agrupa por clasificación ID e incluye una fila por donación; nombres repetidos nunca se fusionan.
+- La misma transacción cambia a `entregada` cada donación de la campaña, identificada por su ID, y guarda la entrega. Si no puede actualizar todas o guardar el registro, la transacción falla y no se devuelve éxito. Una segunda entrega responde `409`.
+- `PATCH /api/donacion/:id/entregar` no permite entrega individual si la campaña ya finalizó y todas sus donaciones están en `en_entrega`; en ese caso se debe usar la entrega general.
+- `GET /api/campanas/admin/lista` añade `entregaRegistrada` y `entregaGeneralId` a cada campaña.
+- `GET /api/campanas/:id/donaciones` — administrador o recolector. El administrador recibe todas las donaciones y `entregaGeneral` completa. El recolector recibe solo las donaciones de los puntos activos en los que está asignado, sin la entrega general ni los IDs de asignación de otros puntos. `clasificacionPorPunto` agrupa categorías y cantidades totales, conservando el detalle por donación, donante, producto, nombre del bien y cantidad. Un recolector sin punto activo asignado recibe `403`; el punto autorizado se resuelve desde la campaña y la identidad autenticada.
+- Los productos sin `metadata.cantidad` se incluyen en su grupo y se cuentan en `donacionesSinCantidad`; no se inventa una cantidad. `cantidad` suma solo cantidades válidas declaradas.
 
 ## Respuestas de error
 

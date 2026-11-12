@@ -202,8 +202,8 @@ test("emits one transition per exit/return and none for repeated fixes", () => {
   assert.equal(getCollectorGeofenceTransition("sin_registro", "dentro"), null);
 });
 
-test("all collector write endpoints enforce the backend geofence", () => {
-  const protectedRoutes = [
+test("collector donation operations preserve role checks without requiring a geofence", () => {
+  const collectorRoutes = [
     ["post", "/registrar-por-recolector"],
     ["patch", "/:id/asignar"],
     ["patch", "/:id/pendiente-recoleccion"],
@@ -216,15 +216,32 @@ test("all collector write endpoints enforce the backend geofence", () => {
     ["post", "/:id/evidencias"],
   ];
 
-  for (const [method, path] of protectedRoutes) {
+  for (const [method, path] of collectorRoutes) {
     const route = donationRoutes.stack.find(
       (layer) => layer.route?.path === path && layer.route.methods[method]
     )?.route;
     assert.ok(route, `expected ${method.toUpperCase()} ${path} to exist`);
-    assert.ok(
+    assert.equal(
       route.stack.some((layer) => layer.handle === requireCollectorGeofence),
-      `expected ${method.toUpperCase()} ${path} to enforce the geofence`
+      false,
+      `did not expect ${method.toUpperCase()} ${path} to enforce the geofence`
     );
+    const roleCheck = route.stack[0].handle;
+    let allowed = false;
+    roleCheck(
+      { user: { rol: "recolector" } },
+      { status: (code) => ({ json: () => { assert.equal(code, 403); } }) },
+      () => { allowed = true; }
+    );
+    assert.equal(allowed, true, `expected ${method.toUpperCase()} ${path} to retain the role check`);
+
+    let forbidden = false;
+    roleCheck(
+      { user: { rol: "donante" } },
+      { status: (code) => ({ json: () => { forbidden = code === 403; } }) },
+      () => { assert.fail("non-collector role must not pass"); }
+    );
+    assert.equal(forbidden, true, `expected ${method.toUpperCase()} ${path} to reject non-collectors`);
   }
 });
 

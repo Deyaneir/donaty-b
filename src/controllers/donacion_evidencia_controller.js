@@ -1,6 +1,7 @@
 import { unlink } from "node:fs/promises";
 import mongoose from "mongoose";
 import Donacion from "../models/Donacion.js";
+import { serializeDonationEvidence } from "../utils/donationEvidence.js";
 import { deleteImage, uploadImage } from "../helpers/cloudinaryImages.js";
 
 const STAGE_STATES = {
@@ -8,21 +9,27 @@ const STAGE_STATES = {
   finalizacion: ["entregada"],
   devolucion: ["devolucion", "devuelta"],
 };
+const MAX_EVIDENCE_IMAGES = 2;
 
-const groupEvidenceByStage = (evidences = []) => ({
-  recepcion: evidences.filter((item) => item.etapa === "recepcion"),
-  finalizacion: evidences.filter((item) => item.etapa === "finalizacion"),
-  devolucion: evidences.filter((item) => item.etapa === "devolucion"),
-});
+const getEvidenceFiles = (files = {}) => {
+  const normalize = (value) => value == null ? [] : Array.isArray(value) ? value : [value];
+  return [
+    ...normalize(files.imagen),
+    ...normalize(files.imagenes),
+    ...normalize(files.evidencias),
+  ];
+};
 
 const subirEvidenciaDonacion = async (req, res) => {
-  let uploadedImage = null;
-  const image = !Array.isArray(req.files?.imagen) ? req.files?.imagen : null;
+  let uploadedImages = [];
+  const images = getEvidenceFiles(req.files);
   try {
     const user = req.user || req.donanteHeader;
     const { id } = req.params;
     const stage = String(req.body?.etapa ?? "").trim().toLowerCase();
-    const idempotencyKey = String(req.get("Idempotency-Key") ?? "").trim();
+    const idempotencyKey = String(
+      req.get("Idempotency-Key") ?? req.body?.idempotencyKey ?? ""
+    ).trim();
 
     if (!mongoose.isValidObjectId(id)) {
       return res.status(400).json({ msg: "El identificador de donación no es válido" });
@@ -31,10 +38,12 @@ const subirEvidenciaDonacion = async (req, res) => {
       return res.status(400).json({ msg: "La etapa debe ser recepcion, finalizacion o devolucion" });
     }
     if (!idempotencyKey || idempotencyKey.length > 128) {
-      return res.status(400).json({ msg: "Debes enviar un encabezado Idempotency-Key válido" });
+      return res.status(400).json({ msg: "Debes enviar un idempotencyKey válido" });
     }
 
-    const donation = await Donacion.findById(id).select("_id estado recolector evidencias");
+    const donation = await Donacion.findById(id)
+      .select("_id estado recolector evidencias")
+      .populate("evidencias.recolector", "nombre apellido");
     if (!donation) return res.status(404).json({ msg: "Donación no encontrada" });
     if (String(donation.recolector) !== String(user._id)) {
       return res.status(403).json({ msg: "Solo el recolector asignado puede subir evidencia" });
@@ -49,24 +58,36 @@ const subirEvidenciaDonacion = async (req, res) => {
       (item) => item.idempotencyKey === idempotencyKey
     );
     if (existing) {
+      const evidenciasPorEtapa = serializeDonationEvidence(donation.evidencias);
       return res.status(200).json({
-        evidencia: existing,
-        evidenciasPorEtapa: groupEvidenceByStage(donation.evidencias),
+        evidencia: evidenciasPorEtapa[stage],
+        evidencias: evidenciasPorEtapa,
+        evidenciasPorEtapa,
         duplicada: true,
       });
     }
 
-    uploadedImage = await uploadImage(image, `donaty/evidencias/${stage}`);
-    if (!uploadedImage) {
+    if (!images.length) {
       return res.status(400).json({ msg: "Debes adjuntar una imagen de evidencia" });
     }
-    const evidence = {
+    if (images.length > MAX_EVIDENCE_IMAGES) {
+      return res.status(400).json({
+        msg: `Puedes adjuntar hasta ${MAX_EVIDENCE_IMAGES} fotografías por evidencia`,
+      });
+    }
+    for (const image of images) {
+      uploadedImages.push(
+        await uploadImage(image, `donaty/evidencias/${stage}`)
+      );
+    }
+    const evidenceDate = new Date();
+    const evidence = uploadedImages.map((uploadedImage) => ({
       etapa: stage,
       recolector: user._id,
-      fecha: new Date(),
+      fecha: evidenceDate,
       ...uploadedImage,
       idempotencyKey,
-    };
+    }));
 
     const result = await Donacion.updateOne(
       {
@@ -75,20 +96,26 @@ const subirEvidenciaDonacion = async (req, res) => {
         estado: { $in: STAGE_STATES[stage] },
         "evidencias.idempotencyKey": { $ne: idempotencyKey },
       },
-      { $push: { evidencias: evidence } },
+      { $push: { evidencias: { $each: evidence } } },
       { runValidators: true }
     );
     if (result.modifiedCount !== 1) {
-      const current = await Donacion.findById(id).select("estado recolector evidencias");
-      const duplicate = current?.evidencias.find(
+      const current = await Donacion.findById(id)
+        .select("estado recolector evidencias")
+        .populate("evidencias.recolector", "nombre apellido");
+      const duplicates = (current?.evidencias || []).filter(
         (item) => item.idempotencyKey === idempotencyKey
       );
-      await deleteImage(uploadedImage.imagenPublicId);
-      uploadedImage = null;
-      if (duplicate) {
+      for (const image of uploadedImages) {
+        await deleteImage(image.imagenPublicId);
+      }
+      uploadedImages = [];
+      if (duplicates.length) {
+        const evidenciasPorEtapa = serializeDonationEvidence(current.evidencias);
         return res.status(200).json({
-          evidencia: duplicate,
-          evidenciasPorEtapa: groupEvidenceByStage(current.evidencias),
+        evidencia: evidenciasPorEtapa[stage],
+        evidencias: evidenciasPorEtapa,
+        evidenciasPorEtapa,
           duplicada: true,
         });
       }
@@ -97,20 +124,21 @@ const subirEvidenciaDonacion = async (req, res) => {
       });
     }
 
-    uploadedImage = null;
-    const updated = await Donacion.findById(id).select("evidencias");
-    const savedEvidence = updated.evidencias.find(
-      (item) => item.idempotencyKey === idempotencyKey
-    );
+    uploadedImages = [];
+    const updated = await Donacion.findById(id)
+      .select("evidencias")
+      .populate("evidencias.recolector", "nombre apellido");
+    const evidenciasPorEtapa = serializeDonationEvidence(updated.evidencias);
     return res.status(201).json({
-      evidencia: savedEvidence,
-      evidenciasPorEtapa: groupEvidenceByStage(updated.evidencias),
+      evidencia: evidenciasPorEtapa[stage],
+      evidencias: evidenciasPorEtapa,
+      evidenciasPorEtapa,
       duplicada: false,
     });
   } catch (error) {
-    if (uploadedImage?.imagenPublicId) {
+    for (const image of uploadedImages) {
       try {
-        await deleteImage(uploadedImage.imagenPublicId);
+        await deleteImage(image.imagenPublicId);
       } catch (cleanupError) {
         console.error("No se pudo limpiar evidencia duplicada:", cleanupError.message || cleanupError);
       }
@@ -120,7 +148,8 @@ const subirEvidenciaDonacion = async (req, res) => {
       msg: error.statusCode ? error.message : "Error al guardar la evidencia",
     });
   } finally {
-    if (image?.tempFilePath) {
+    for (const image of images) {
+      if (!image?.tempFilePath) continue;
       try {
         await unlink(image.tempFilePath);
       } catch (cleanupError) {
@@ -132,4 +161,4 @@ const subirEvidenciaDonacion = async (req, res) => {
   }
 };
 
-export { subirEvidenciaDonacion };
+export { getEvidenceFiles, subirEvidenciaDonacion };

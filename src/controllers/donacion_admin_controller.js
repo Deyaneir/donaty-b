@@ -5,6 +5,11 @@ import Campana from "../models/Campana.js";
 import ChatConversation from "../models/ChatConversation.js";
 import { notifyUsers } from "../services/firebase_notifications.js";
 import { TERMINAL_DONATION_STATES } from "../services/donationAssignment.js";
+import { publishDonationEvent } from "../services/domainEvents.js";
+import {
+  getAcademicPeriodStartMonth,
+  resolveAcademicPeriod,
+} from "../utils/academicPeriod.js";
 
 const ESTADOS = [
   "pendiente",
@@ -40,14 +45,14 @@ const nombreCompleto = (p) =>
 
 const conRelaciones = (query) =>
   query
-    .populate("campana", "nombre activa")
+    .populate("campana", "nombre activa fechaInicio fechaFin periodoAcademico")
     .populate("donante", "nombre apellido email telefono")
     .populate("recolector", "nombre apellido email telefono");
 
 /** Lista de donaciones físicas, con filtros opcionales por estado y campaña. */
 const listarDonacionesAdmin = async (req, res) => {
   try {
-    const { estado, campana } = req.query || {};
+    const { estado, campana, recolector, periodoAcademico } = req.query || {};
     const filtro = { tipo: "fisica" };
 
     if (estado) {
@@ -69,11 +74,61 @@ const listarDonacionesAdmin = async (req, res) => {
       }
     }
 
+    if (recolector) {
+      const collectorId = String(recolector).trim();
+      if (collectorId === "ninguno") {
+        filtro.recolector = null;
+      } else if (mongoose.Types.ObjectId.isValid(collectorId)) {
+        filtro.recolector = collectorId;
+      } else {
+        return res.status(400).json({ msg: "Recolector inválido" });
+      }
+    }
+
+    if (periodoAcademico !== undefined) {
+      const period = String(periodoAcademico).trim();
+      if (!/^\d{4}-[AB]$/.test(period)) {
+        return res.status(400).json({ msg: "Período académico inválido" });
+      }
+      const [yearText, half] = period.split("-");
+      const year = Number(yearText);
+      const boundary = getAcademicPeriodStartMonth();
+      const startMonth = half === "B" ? boundary : 1;
+      const endMonth = half === "A" ? boundary : 13;
+      const campaignIds = await Campana.find({
+        fechaInicio: {
+          $gte: new Date(Date.UTC(year, startMonth - 1, 1)),
+          $lt: new Date(Date.UTC(year, endMonth - 1, 1)),
+        },
+      }).distinct("_id");
+      filtro.$and = [{
+        $or: [
+          { periodoAcademico: period },
+          ...(campaignIds.length ? [{ campana: { $in: campaignIds } }] : []),
+        ],
+      }];
+    }
+
     const items = await conRelaciones(
       Donacion.find(filtro).sort({ createdAt: -1 }).limit(1000)
     );
 
-    return res.status(200).json({ total: items.length, items });
+    return res.status(200).json({
+      total: items.length,
+      items: items.map((item) => {
+        const donation = item.toObject();
+        return {
+          ...donation,
+          periodoAcademico:
+            donation.periodoAcademico
+            || donation.campana?.periodoAcademico
+            || resolveAcademicPeriod(
+              donation.campana?.fechaInicio || donation.campana?.createdAt
+            )
+            || null,
+        };
+      }),
+    });
   } catch (error) {
     console.error("Error al listar donaciones (admin):", error);
     return res.status(500).json({ msg: "Error al consultar las donaciones" });
@@ -179,8 +234,11 @@ const asignarDonacionAdmin = async (req, res) => {
         !point
         || point.activo === false
         || String(point.estado || "").toLowerCase() === "inactivo"
-        || !(point.recolectores || []).some(
-          (assignedId) => String(assignedId) === String(recolector._id)
+        || (
+          !(point.recolectores || []).some(
+            (assignedId) => String(assignedId) === String(recolector._id)
+          )
+          && String(point.responsableRecolector || "") !== String(recolector._id)
         )
       ) {
         return res.status(409).json({
@@ -201,21 +259,21 @@ const asignarDonacionAdmin = async (req, res) => {
         estado: "asignada",
         fechaAsignacion,
       };
-    } else if (actual.estado === "asignada") {
+    } else if (["asignada", "pendiente_recoleccion", "recolectada"].includes(actual.estado)) {
       if (String(actual.recolector) === String(recolector._id)) {
         return res.status(409).json({
           msg: `La donación ya está asignada a ${nombreCompleto(recolector)}. Elige otro recolector.`,
         });
       }
-      filtro = { _id: id, tipo: "fisica", estado: "asignada" };
+      filtro = { _id: id, tipo: "fisica", estado: actual.estado };
       cambios = { recolector: recolector._id, fechaAsignacion };
       reasignacion = true;
     } else {
       return res.status(409).json({
         msg:
           `No se puede asignar esta donación porque está en estado "${etiqueta(actual.estado)}". ` +
-          "Solo se asigna cuando está pendiente de asignación y se reasigna " +
-          "mientras está asignada y no ha sido recolectada.",
+          "Solo se asigna cuando está pendiente y se reasigna antes de finalizar " +
+          "la actividad pendiente.",
       });
     }
 
@@ -226,6 +284,7 @@ const asignarDonacionAdmin = async (req, res) => {
       recolectorNuevo: recolector._id,
       puntoRecoleccionAnterior: actual.puntoRecoleccionRef || null,
       puntoRecoleccionNuevo: actual.puntoRecoleccionRef || null,
+      estado: actual.estado,
       administrador: req.user._id,
       fecha: fechaAsignacion,
       motivo: String(req.body?.motivo ?? "").trim().slice(0, 500),
@@ -296,11 +355,16 @@ const asignarDonacionAdmin = async (req, res) => {
       title: "Nueva donación asignada",
       body: `Código ${donacion._id}: revisa los detalles de la donación.`,
       data: {
+        tipo: "donation_assigned",
         type: "donation_assigned",
-        donationId: donacion._id,
+        donacionId: String(donacion._id),
+        donationId: String(donacion._id),
+        campanaId: String(donacion.campana?._id ?? donacion.campana ?? ""),
+        campaignId: String(donacion.campana?._id ?? donacion.campana ?? ""),
       },
     });
 
+    publishDonationEvent(req, "donation.assignment.updated", donacion);
     return res.status(200).json({
       msg: reasignacion
         ? `Donación reasignada correctamente a ${nombreCompleto(recolector)}`

@@ -2,6 +2,21 @@ const isPickupPointActive = (point) =>
   String(point?.estado ?? "").toLowerCase() !== "inactivo"
   && point?.activo !== false;
 
+const isCollectorAssignedToPoint = (point, collectorId) => {
+  const id = String(collectorId);
+  return String(point?.responsableRecolector?._id ?? point?.responsableRecolector ?? "") === id
+    || (point?.recolectores || []).some(
+      (assignedId) => String(assignedId?._id ?? assignedId) === id
+    );
+};
+
+const buildPointCollectorAssignmentFilter = (collectorId) => ({
+  $or: [
+    { recolectores: collectorId },
+    { responsableRecolector: collectorId },
+  ],
+});
+
 const serializePickupPoint = (point, campanaId, { includeAssignments = true } = {}) => {
   const serialized = {
     ...point,
@@ -28,9 +43,16 @@ const serializePickupPoint = (point, campanaId, { includeAssignments = true } = 
 
   if (includeAssignments) {
     serialized.recolectoresAsignados = point.recolectores?.length ?? 0;
+    serialized.recolectoresSecundarios = (point.recolectores || [])
+      .filter(
+        (collectorId) =>
+          String(collectorId) !== String(point.responsableRecolector || "")
+      )
+      .map(String);
   } else {
     delete serialized.recolectores;
     delete serialized.responsableRecolector;
+    delete serialized.recolectoresSecundarios;
   }
   return serialized;
 };
@@ -81,29 +103,70 @@ const serializeCollectorAssignments = (campaigns, collectorId) =>
       .filter(
         (point) =>
           isPickupPointActive(point)
-          && (point.recolectores || [])
-            .some((assignedId) => String(assignedId) === String(collectorId))
+          && isCollectorAssignedToPoint(point, collectorId)
       )
-      .map((point) => ({
-        campanaId: String(campaign._id),
-        campanaNombre: campaign.nombre ?? "",
-        puntoRecoleccionId: String(point._id),
-        puntoNombre: point.nombre ?? "",
-        edificioId: point.edificioId ?? null,
-        nombreEdificio: point.nombreEdificio ?? "",
-        edificio: point.edificio ?? "",
-        piso: point.piso ?? "",
-        aula: point.aula ?? "",
-        latitud: point.latitud ?? null,
-        longitud: point.longitud ?? null,
-        horariosAtencion: point.horariosAtencion ?? [],
-        direccion: point.direccion ?? "",
-        referenciasLugar: point.referenciasLugar ?? "",
-      }))
+      .map((point) => {
+        const pointId = String(point._id);
+        const collectorKey = String(collectorId);
+        const assignmentHistory = (campaign.historialAsignacionesRecolectores || [])
+          .filter((entry) =>
+            String(entry?.recolector?._id ?? entry?.recolector ?? "") === collectorKey
+            && String(entry?.puntoNuevo?._id ?? entry?.puntoNuevo ?? "") === pointId
+            && entry?.vigente !== false
+          )
+          .sort((left, right) =>
+            new Date(right.fecha || 0).getTime() - new Date(left.fecha || 0).getTime()
+          );
+        const assignmentDate = assignmentHistory[0]?.fecha
+          ? new Date(assignmentHistory[0].fecha)
+          : null;
+        const fechaAsignacion = assignmentDate && !Number.isNaN(assignmentDate.getTime())
+          ? assignmentDate.toISOString()
+          : null;
+
+        return {
+          campanaId: String(campaign._id),
+          campanaNombre: campaign.nombre ?? "",
+          puntoRecoleccionId: pointId,
+          puntoNombre: point.nombre ?? "",
+          edificioId: point.edificioId ?? null,
+          nombreEdificio: point.nombreEdificio ?? "",
+          edificio: point.edificio ?? "",
+          piso: point.piso ?? "",
+          aula: point.aula ?? "",
+          latitud: point.latitud ?? null,
+          longitud: point.longitud ?? null,
+          horariosAtencion: point.horariosAtencion ?? [],
+          direccion: point.direccion ?? "",
+          referenciasLugar: point.referenciasLugar ?? "",
+          fechaAsignacion,
+          rol: String(point.responsableRecolector?._id ?? point.responsableRecolector ?? "")
+            === collectorKey
+            ? "principal"
+            : "secundario",
+          punto: {
+            _id: pointId,
+            id: pointId,
+            nombre: point.nombre ?? "",
+            edificioId: point.edificioId ?? null,
+            nombreEdificio: point.nombreEdificio ?? "",
+            edificio: point.edificio ?? "",
+            piso: point.piso ?? "",
+            aula: point.aula ?? "",
+            latitud: point.latitud ?? null,
+            longitud: point.longitud ?? null,
+            direccion: point.direccion ?? "",
+            referenciasLugar: point.referenciasLugar ?? "",
+            horariosAtencion: point.horariosAtencion ?? [],
+          },
+        };
+      })
   );
 
 export {
   isPickupPointActive,
+  isCollectorAssignedToPoint,
+  buildPointCollectorAssignmentFilter,
   serializePickupPoint,
   serializePickupPoints,
   serializeTracePickupPoint,

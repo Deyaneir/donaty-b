@@ -1,6 +1,7 @@
 import { Router } from "express";
 import auth from "../middlewares/JWT.js";
 import requireRole from "../middlewares/requireRole.js";
+import rejectClosedCampaignMutation from "../middlewares/rejectClosedCampaignMutation.js";
 
 import {
   listarCampanas,
@@ -9,32 +10,88 @@ import {
   listarDistribucionRecolectores,
   distribuirRecolectores,
   reasignarRecolectorAPunto,
+  retirarRecolectorDeCampana,
   listarUbicacionesRecolectores,
 } from "../controllers/campana_controller.js";
 import {
   listarCategoriasDeCampana,
   crearCategoriaEnCampana,
 } from "../controllers/categoria_controller.js";
+import {
+  consultarClasificacionesDePunto,
+  listarHistorialCampanas,
+  listarHistorialDonacionesRecolector,
+} from "../controllers/campana_admin_controller.js";
+import {
+  consultarEntregaGeneral,
+  consultarEstadoEntregaGeneral,
+  registrarEntregaGeneral,
+} from "../controllers/entrega_campana_controller.js";
 
 const router = Router();
 
 router.get(
+  "/historial",
+  auth,
+  requireRole("admin", "recolector", "donante"),
+  listarHistorialCampanas
+);
+router.get(
+  "/:id/historial-recolector",
+  auth,
+  requireRole("admin", "recolector"),
+  listarHistorialDonacionesRecolector
+);
+router.get(
   "/:campaignId/distribucion-recolectores",
   auth,
-  requireRole("admin"),
+  requireRole("admin", "recolector"),
   listarDistribucionRecolectores
 );
 router.post(
   "/:campaignId/distribucion-recolectores",
   auth,
   requireRole("admin"),
+  rejectClosedCampaignMutation("campaign"),
   distribuirRecolectores
 );
 router.put(
   "/:campaignId/puntos/:pointId/reasignar",
   auth,
   requireRole("admin"),
+  rejectClosedCampaignMutation("campaign"),
   reasignarRecolectorAPunto
+);
+router.get(
+  "/:campaignId/entrega-general/estado",
+  auth,
+  requireRole("recolector"),
+  consultarEstadoEntregaGeneral
+);
+router.get(
+  "/:campanaId/entrega",
+  auth,
+  requireRole("admin", "recolector"),
+  consultarEntregaGeneral
+);
+router.post(
+  "/:campaignId/entrega-general",
+  auth,
+  requireRole("recolector"),
+  registrarEntregaGeneral
+);
+router.post(
+  "/:campanaId/entrega",
+  auth,
+  requireRole("recolector"),
+  registrarEntregaGeneral
+);
+router.delete(
+  "/:campaignId/recolectores/:collectorId",
+  auth,
+  requireRole("admin"),
+  rejectClosedCampaignMutation("campaign"),
+  retirarRecolectorDeCampana
 );
 router.get(
   "/:campaignId/ubicaciones-recolectores",
@@ -59,11 +116,18 @@ router.get(
   requireRole("admin", "donante", "recolector"),
   listarCategoriasDeCampana
 );
+router.get(
+  "/:campanaId/clasificaciones",
+  auth,
+  requireRole("admin", "recolector"),
+  consultarClasificacionesDePunto
+);
 
 router.post(
   "/:campanaId/categorias",
   auth,
   requireRole("admin"),
+  rejectClosedCampaignMutation("campaign"),
   (req, res) => crearCategoriaEnCampana(req, res, req.params.campanaId)
 );
 
@@ -80,6 +144,7 @@ router.patch(
   "/:id",
   auth,
   requireRole("admin"),
+  rejectClosedCampaignMutation("campaign"),
   actualizarCampana
 );
 

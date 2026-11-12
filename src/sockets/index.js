@@ -73,6 +73,10 @@ const attachSocket = (server) => {
   });
 
   io.on("connection", (socket) => {
+    const role = String(socket.data.user?.rol || "").toLowerCase();
+    const userId = String(socket.data.user?._id || "");
+    socket.join(`role:${role}`);
+    socket.join(`user:${role}:${userId}`);
     socket.emit("connected", { ok: true, user: socket.data.user });
 
     socket.on("joinRoom", async ({ roomId } = {}) => {

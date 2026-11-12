@@ -5,6 +5,7 @@ import {
   actualizarUbicacionRecolector,
   actualizarSimulacionUbicacionRecolector,
   consultarUbicacionRecolector,
+  consultarUltimaUbicacionRecolector,
   consultarSimuladorUbicacionRecolector,
   limpiarSimulacionUbicacionRecolector,
 } from "../controllers/recolector_controller.js";
@@ -30,6 +31,12 @@ router.delete(
   auth,
   requireRole("recolector"),
   limpiarSimulacionUbicacionRecolector
+);
+router.get(
+  "/:collectorId/ubicacion",
+  auth,
+  requireRole("admin", "recolector"),
+  consultarUltimaUbicacionRecolector
 );
 
 export default router;

@@ -38,13 +38,39 @@ const puntoRecoleccionSchema = new Schema(
 const asignacionRecolectorSchema = new Schema(
   {
     recolector: { type: Schema.Types.ObjectId, ref: "Recolector", required: true },
+    recolectorAnterior: { type: Schema.Types.ObjectId, ref: "Recolector", default: null },
     campana: { type: Schema.Types.ObjectId, ref: "Campana", required: true },
     puntoAnterior: { type: Schema.Types.ObjectId, default: null },
     puntoNuevo: { type: Schema.Types.ObjectId, default: null },
+    donacionesTransferidas: {
+      type: [{
+        donacion: { type: Schema.Types.ObjectId, ref: "Donacion", required: true },
+        estado: { type: String, required: true },
+      }],
+      default: [],
+    },
     administrador: { type: Schema.Types.ObjectId, ref: "Admin", required: true },
     fecha: { type: Date, required: true, default: Date.now },
     motivo: { type: String, default: "", trim: true, maxlength: 500 },
     vigente: { type: Boolean, default: true },
+  },
+  { _id: true }
+);
+
+const responsableCampanaSchema = new Schema(
+  {
+    nombreCompleto: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 160,
+    },
+    cargo: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 120,
+    },
   },
   { _id: true }
 );
@@ -87,6 +113,15 @@ const campanaSchema = new Schema(
       type: Date,
       default: null,
     },
+    diasAtencion: {
+      type: [{ type: Number, min: 1, max: 7 }],
+      default: undefined,
+    },
+    periodoAcademico: {
+      type: String,
+      default: null,
+      trim: true,
+    },
     horaInicio: {
       type: String,
       default: "",
@@ -99,7 +134,7 @@ const campanaSchema = new Schema(
     },
     estado: {
       type: String,
-      enum: ["borrador", "activa", "finalizada", "desactivada"],
+      enum: ["borrador", "activa", "finalizada", "cerrada", "desactivada"],
       default: null,
       index: true,
     },
@@ -126,6 +161,10 @@ const campanaSchema = new Schema(
     },
     categoriasPermitidas: {
       type: [{ type: Schema.Types.ObjectId, ref: "Categoria" }],
+      default: [],
+    },
+    responsablesCampana: {
+      type: [responsableCampanaSchema],
       default: [],
     },
     puntosRecoleccion: { type: [puntoRecoleccionSchema], default: [] },

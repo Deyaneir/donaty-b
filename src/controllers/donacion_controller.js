@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { unlink } from "node:fs/promises";
 import Donacion from "../models/Donacion.js";
 import { isBlank } from "../utils/validation.js";
 import { fetchEmbedding, cosineSimilarity } from "./ai_controller.js";
@@ -13,21 +14,49 @@ import {
 import { uploadImage, deleteImage } from "../helpers/cloudinaryImages.js";
 import Admin from "../models/Admin.js";
 import Donante from "../models/Donante.js";
+import EntregaCampana from "../models/EntregaCampana.js";
 import { notifyUsers } from "../services/firebase_notifications.js";
+import {
+  createCampaignDelivery,
+  isCampaignFinished,
+} from "../services/campaignDelivery.js";
 import { resolveDonationDelivery } from "../utils/donationDelivery.js";
 import { createDonationWithAssignment } from "../services/donationAssignment.js";
+import { resolveAcademicPeriod } from "../utils/academicPeriod.js";
+import { publishDonationEvent } from "../services/domainEvents.js";
 import {
   classifyCollectorGeofenceState,
   hasValidCollectorCoordinates,
 } from "../utils/collectorLocation.js";
+import { serializeCampaignDeliveryForDonor } from "../utils/campaignDelivery.js";
 import { isInsideEpnCampus } from "../utils/epnCampusGeofence.js";
 import {
+  isCollectorAssignedToPoint,
+  isPickupPointActive,
   serializeTracePickupPoint,
 } from "../utils/pickupPoints.js";
+import { resolverPuntoId } from "../utils/pickupPointResolver.js";
+import {
+  buildCurrentCollectorCampaignFilter,
+  buildPendingCollectorDonationFilter,
+} from "../utils/collectorHistory.js";
+import {
+  isCampaignAvailableNow,
+  isCampaignScheduleFinished,
+} from "../utils/campaignSchedule.js";
 import {
   parseDonationCollectionLocation,
   realGpsCoordinates,
 } from "../utils/donationLocation.js";
+import {
+  buildCollectorDonorFields,
+  parseCollectorDonationMetadata,
+  parseExternalDonor,
+} from "../utils/collectorDonationInput.js";
+import { normalizeClassifiedProducts } from "../utils/donationClassification.js";
+import { serializeDonationEvidence } from "../utils/donationEvidence.js";
+import { resolveDonationClassification } from "../services/donationClassifications.js";
+import { urlPublica } from "../utils/publicUrl.js";
 
 const notifyAdminsOfNewDonation = async (donacion) => {
   try {
@@ -38,9 +67,12 @@ const notifyAdminsOfNewDonation = async (donacion) => {
       title: "Nueva donación registrada",
       body: `Código ${donacion._id}: revisa la donación registrada.`,
       data: {
+        tipo: "new_donation",
         type: "new_donation",
-        donationId: donacion._id,
-        campaignId: donacion.campana?._id || donacion.campana || "",
+        donacionId: String(donacion._id),
+        donationId: String(donacion._id),
+        campanaId: String(donacion.campana?._id || donacion.campana || ""),
+        campaignId: String(donacion.campana?._id || donacion.campana || ""),
       },
     });
   } catch (error) {
@@ -56,8 +88,12 @@ const notifyCollectorOfAutomaticAssignment = async (donacion, collectorId) => {
       title: "Nueva donación asignada",
       body: `Código ${donacion._id}: revisa los detalles de la donación.`,
       data: {
+        tipo: "donation_assigned",
         type: "donation_assigned",
-        donationId: donacion._id,
+        donacionId: String(donacion._id),
+        donationId: String(donacion._id),
+        campanaId: String(donacion.campana?._id || donacion.campana || ""),
+        campaignId: String(donacion.campana?._id || donacion.campana || ""),
       },
     });
   } catch (error) {
@@ -86,6 +122,31 @@ const normalizeTipo = (value = "") => {
 };
 
 const normalizeEstado = (value = "") => String(value).trim().toLowerCase();
+const getCampaignDonationRegistrationError = (campaign) => {
+  const state = String(campaign?.estado ?? "").toLowerCase();
+  if (state === "finalizada" || isCampaignScheduleFinished(campaign)) {
+    return Object.assign(
+      new Error("La campaña finalizó y no acepta nuevas donaciones"),
+      { statusCode: 409 }
+    );
+  }
+  if (
+    campaign?.activa !== true
+    || ["borrador", "desactivada"].includes(state)
+  ) {
+    return Object.assign(
+      new Error("La campaña está inactiva y no acepta nuevas donaciones"),
+      { statusCode: 409 }
+    );
+  }
+  if (!isCampaignAvailableNow(campaign)) {
+    return Object.assign(
+      new Error("La campaña no está dentro de su fecha y horario de disponibilidad"),
+      { statusCode: 409 }
+    );
+  }
+  return null;
+};
 const parseCoordinatePair = (latitud, longitud) => {
   const latMissing = latitud === undefined || latitud === null || latitud === "";
   const lngMissing = longitud === undefined || longitud === null || longitud === "";
@@ -131,18 +192,45 @@ const validateCategoryQuantity = (metadata, category) => {
   }
 };
 
+const resolveDonationRegistrationError = (error) => {
+  if (error?.statusCode) {
+    return { statusCode: error.statusCode, message: error.message };
+  }
+  if (error instanceof mongoose.Error.ValidationError) {
+    const messages = Object.values(error.errors || {})
+      .map((item) => item.message)
+      .filter(Boolean);
+    return {
+      statusCode: 400,
+      message: messages.length
+        ? messages.join("; ")
+        : "Los datos de la donación no son válidos",
+    };
+  }
+  if (error instanceof mongoose.Error.CastError) {
+    return {
+      statusCode: 400,
+      message: `El campo ${error.path} tiene un formato no válido`,
+    };
+  }
+  return {
+    statusCode: 500,
+    message: "No se pudo registrar la donación",
+  };
+};
+
 const resolvePickupPoint = (campaign, pointId, collectorId = null) => {
   if (!pointId) return null;
   if (!mongoose.isValidObjectId(String(pointId))) {
     throw Object.assign(new Error("El punto de recolección no es válido"), { statusCode: 400 });
   }
   const point = campaign.puntosRecoleccion?.id(pointId);
-  if (!point || point.activo === false) {
+  if (!point || !isPickupPointActive(point)) {
     throw Object.assign(new Error("El punto no pertenece a la campaña activa"), { statusCode: 400 });
   }
   if (
     collectorId
-    && !(point.recolectores || []).some((id) => String(id) === String(collectorId))
+    && !isCollectorAssignedToPoint(point, collectorId)
   ) {
     throw Object.assign(new Error("No estás asignado al punto de recolección indicado"), { statusCode: 403 });
   }
@@ -208,9 +296,12 @@ const crearDonacion = async (req, res) => {
       return res.status(400).json({ msg: "La campaña indicada no es válida" });
     }
     const campanaDoc = await Campana.findById(campana)
-      .select("activa categoriasPermitidas puntosRecoleccion");
+      .select("activa estado fechaInicio fechaFin horaInicio horaFin categoriasPermitidas puntosRecoleccion");
     if (!campanaDoc) return res.status(404).json({ msg: "La campaña indicada no existe" });
-    if (!campanaDoc.activa) return res.status(400).json({ msg: "La campaña indicada no está activa" });
+    const registrationError = getCampaignDonationRegistrationError(campanaDoc);
+    if (registrationError) {
+      return res.status(registrationError.statusCode).json({ msg: registrationError.message });
+    }
     if (String(categoriaResuelta.campanaId) !== String(campanaDoc._id)) {
       return res.status(400).json({ msg: "La categoría no pertenece a la campaña indicada" });
     }
@@ -291,6 +382,9 @@ const crearDonacion = async (req, res) => {
           donante: user._id,
           nombreDonante: delivery.nombreDonante,
           campana: campaign._id,
+          periodoAcademico:
+            campaign.periodoAcademico
+            || resolveAcademicPeriod(campaign.fechaInicio),
           categoria: categoriaResuelta.categoria,
           categoriaRef: categoriaResuelta.categoriaId,
           nombreBien: String(nombreBien).trim(),
@@ -330,12 +424,18 @@ const crearDonacion = async (req, res) => {
         console.warn("No se pudo guardar embedding:", error?.message || error);
       }
     }
+    publishDonationEvent(req, "donation.created", donacion);
     void notifyAdminsOfNewDonation(donacion);
     void notifyCollectorOfAutomaticAssignment(
       donacion,
       asignacion.recolector._id
     );
-    return res.status(201).json({ donacion, asignacion });
+    const data = {
+      tipo: "new_donation",
+      donacionId: String(donacion._id),
+      campanaId: String(donacion.campana?._id ?? donacion.campana ?? ""),
+    };
+    return res.status(201).json({ donacion, asignacion, data });
   } catch (error) {
     if (imagenSubida?.imagenPublicId) {
       try {
@@ -366,13 +466,13 @@ const crearDonacionRecolector = async (req, res) => {
       direccionEntrega,
       telefonoContacto,
       metadata,
+      cantidad,
       campana,
       puntoRecoleccionId,
       donanteExterno,
       nombre,
       apellido,
       telefono,
-      direccion,
       puntoRecoleccion,
       donanteLatitud,
       donanteLongitud,
@@ -396,9 +496,12 @@ const crearDonacionRecolector = async (req, res) => {
       return res.status(400).json({ msg: "La campaña indicada no es válida" });
     }
     const campanaDoc = await Campana.findById(campana)
-      .select("activa categoriasPermitidas puntosRecoleccion");
+      .select("activa estado fechaInicio fechaFin horaInicio horaFin categoriasPermitidas puntosRecoleccion");
     if (!campanaDoc) return res.status(404).json({ msg: "La campaña indicada no existe" });
-    if (!campanaDoc.activa) return res.status(400).json({ msg: "La campaña indicada no está activa" });
+    const registrationError = getCampaignDonationRegistrationError(campanaDoc);
+    if (registrationError) {
+      return res.status(registrationError.statusCode).json({ msg: registrationError.message });
+    }
     if (String(categoriaResuelta.campanaId) !== String(campanaDoc._id)) {
       return res.status(400).json({ msg: "La categoría no pertenece a la campaña indicada" });
     }
@@ -408,9 +511,10 @@ const crearDonacionRecolector = async (req, res) => {
     ) {
       return res.status(400).json({ msg: "La categoría seleccionada no está permitida en esta campaña" });
     }
+    const metadataNormalizada = parseCollectorDonationMetadata(metadata, cantidad);
     const metadataValidada = validateDonationMetadata(
-      metadata,
-      requireAllVisibleDonationFields(metadata, categoriaResuelta.campos)
+      metadataNormalizada,
+      requireAllVisibleDonationFields(metadataNormalizada, categoriaResuelta.campos)
     );
     validateCategoryQuantity(metadataValidada, categoriaResuelta);
     if (isBlank(descripcion)) {
@@ -423,19 +527,17 @@ const crearDonacionRecolector = async (req, res) => {
       return res.status(400).json({ msg: "Debes adjuntar una foto del bien donado" });
     }
 
-    const externo = parseMetadata(donanteExterno);
+    const externo = parseExternalDonor(donanteExterno);
     if (!Object.keys(externo).length) {
       Object.assign(externo, {
         nombre: nombre ?? "",
         apellido: apellido ?? "",
         telefono: telefono ?? "",
-        direccion: direccion ?? "",
       });
     }
     const donorNombre = String(externo.nombre ?? "").trim();
     const donorApellido = String(externo.apellido ?? "").trim();
     const donorTelefono = String(externo.telefono ?? "").trim();
-    const donorDireccion = String(externo.direccion ?? "").trim();
     const donorCoordinates = parseCoordinatePair(
       externo.latitud ?? donanteLatitud,
       externo.longitud ?? donanteLongitud
@@ -454,14 +556,14 @@ const crearDonacionRecolector = async (req, res) => {
     if (isBlank(donorNombre) || isBlank(donorApellido)) {
       return res.status(400).json({ msg: "El nombre y apellido del donante externo son obligatorios" });
     }
-    if (isBlank(donorTelefono) || isBlank(donorDireccion)) {
-      return res.status(400).json({ msg: "El teléfono y la dirección del donante externo son obligatorios" });
+    if (isBlank(donorTelefono)) {
+      return res.status(400).json({ msg: "El teléfono del donante externo es obligatorio" });
     }
     let pickupPointRef = resolvePickupPoint(campanaDoc, puntoRecoleccionId, user._id);
     if (!pickupPointRef && campanaDoc.puntosRecoleccion?.length) {
       const assignedPoints = campanaDoc.puntosRecoleccion.filter((point) =>
-        point.activo !== false
-        && (point.recolectores || []).some((id) => String(id) === String(user._id))
+        isPickupPointActive(point)
+        && isCollectorAssignedToPoint(point, user._id)
       );
       if (assignedPoints.length === 1) pickupPointRef = assignedPoints[0]._id;
       else if (assignedPoints.length > 1) {
@@ -471,11 +573,16 @@ const crearDonacionRecolector = async (req, res) => {
       }
     }
 
-    const direccionFinal = String(direccionEntrega ?? donorDireccion).trim();
-    const telefonoFinal = String(telefonoContacto ?? donorTelefono).trim();
-    if (isBlank(direccionFinal) || isBlank(telefonoFinal)) {
-      return res.status(400).json({ msg: "Debes indicar dirección y teléfono para donaciones físicas" });
-    }
+    const donorFields = buildCollectorDonorFields({
+      donor: {
+        nombre: donorNombre,
+        apellido: donorApellido,
+        telefono: donorTelefono,
+      },
+      coordinates: donorCoordinates,
+      direccionEntrega,
+      telefonoContacto,
+    });
     const descNorm = String(descripcion || "").trim();
     if (descNorm) {
       const duplicada = await Donacion.findOne({
@@ -488,46 +595,51 @@ const crearDonacionRecolector = async (req, res) => {
     }
 
     imagenSubida = await uploadImage(req.files?.imagen, "donaty/donaciones");
-    const donacion = await Donacion.create({
-      recolector: user._id,
-      registradoPorRecolector: user._id,
-      campana: campanaDoc._id,
-      categoria: categoriaResuelta.categoria,
-      categoriaRef: categoriaResuelta.categoriaId,
-      nombreBien: String(nombreBien).trim(),
-      subcategoria: categoriaResuelta.subcategoria,
-      donanteExterno: {
-        nombre: donorNombre,
-        apellido: donorApellido,
-        telefono: donorTelefono,
-        direccion: donorDireccion,
-        ...(donorCoordinates || {}),
-      },
-      tipo: tipoFinal,
-      descripcion: descripcion ?? "",
-      estado: "asignada",
-      puntoRecoleccionRef: pickupPointRef,
-      ...(ubicacionRecoleccion ? { ubicacionRecoleccion } : {}),
-      historialEstados: [statusHistoryEntry("asignada", user)],
-      historialRecolectores: [{
-        recolectorNuevo: user._id,
-        fecha: new Date(),
-        motivo: "Registro inicial por recolector",
-      }],
-      direccionEntrega: direccionFinal,
-      ...(pickupCoordinates ? { puntoRecoleccion: pickupCoordinates } : {}),
-      telefonoContacto: telefonoFinal,
-      metadata: metadataValidada.metadata,
-      camposSnapshot: metadataValidada.camposSnapshot,
-      ...(imagenSubida || {}),
+    const { donacion, asignacion } = await createDonationWithAssignment({
+      campaignId: campanaDoc._id,
+      pointId: pickupPointRef,
+      requestingCollectorId: user._id,
+      buildDonation: ({ campaign, point, assignedAt }) => ({
+        registradoPorRecolector: user._id,
+        campana: campaign._id,
+        periodoAcademico:
+          campaign.periodoAcademico
+          || resolveAcademicPeriod(campaign.fechaInicio),
+        categoria: categoriaResuelta.categoria,
+        categoriaRef: categoriaResuelta.categoriaId,
+        nombreBien: String(nombreBien).trim(),
+        subcategoria: categoriaResuelta.subcategoria,
+        ...donorFields,
+        tipo: tipoFinal,
+        descripcion: descripcion ?? "",
+        estado: "asignada",
+        puntoRecoleccionRef: point._id,
+        ...(ubicacionRecoleccion ? { ubicacionRecoleccion } : {}),
+        historialEstados: [statusHistoryEntry("asignada", user)],
+        ...(pickupCoordinates ? { puntoRecoleccion: pickupCoordinates } : {}),
+        fechaRegistro: assignedAt,
+        metadata: metadataValidada.metadata,
+        camposSnapshot: metadataValidada.camposSnapshot,
+        ...(imagenSubida || {}),
+      }),
     });
     await donacion.populate([
       { path: "recolector", select: "nombre apellido email telefono" },
       { path: "registradoPorRecolector", select: "nombre apellido email telefono" },
       { path: "campana", select: "nombre activa" },
     ]);
+    publishDonationEvent(req, "donation.created", donacion);
     void notifyAdminsOfNewDonation(donacion);
-    return res.status(201).json({ donacion });
+    void notifyCollectorOfAutomaticAssignment(
+      donacion,
+      asignacion.recolector._id
+    );
+    const data = {
+      tipo: "new_donation",
+      donacionId: String(donacion._id),
+      campanaId: String(donacion.campana?._id ?? donacion.campana ?? ""),
+    };
+    return res.status(201).json({ donacion, asignacion, data });
   } catch (error) {
     if (imagenSubida?.imagenPublicId) {
       try {
@@ -536,10 +648,9 @@ const crearDonacionRecolector = async (req, res) => {
         console.warn("No se pudo limpiar la imagen de donación:", cleanupError.message);
       }
     }
-    console.error(error);
-    return res.status(error.statusCode || 500).json({
-      msg: error.statusCode ? error.message : `❌ Error en el servidor - ${error}`,
-    });
+    console.error("Error al registrar donación por recolector:", error);
+    const responseError = resolveDonationRegistrationError(error);
+    return res.status(responseError.statusCode).json({ msg: responseError.message });
   }
 };
 
@@ -550,12 +661,39 @@ const listarMisDonaciones = async (req, res) => {
 
     const items = await Donacion.find({ donante: user._id })
       .sort({ createdAt: -1 })
-      .populate("campana", "nombre activa")
+      .populate(
+        "campana",
+        "nombre activa estado imagenUrl fechaInicio fechaFin periodoAcademico"
+      )
       .populate("recolector", "nombre apellido");
-    return res.status(200).json({ items });
+    const campaignIds = [...new Set(
+      items
+        .map((item) => item.campana?._id)
+        .filter(Boolean)
+        .map(String)
+    )];
+    const deliveries = campaignIds.length
+      ? await EntregaCampana.find({ campana: { $in: campaignIds } })
+        .select("_id campana receptor nombresReceptor apellidosReceptor telefonoReceptor cargoReceptor descripcionBienes fechaEntrega responsablesCampana evidencias estado createdAt updatedAt")
+        .lean()
+      : [];
+    const deliveryByCampaign = new Map(
+      deliveries.map((delivery) => [String(delivery.campana), delivery])
+    );
+    return res.status(200).json({
+      items: items.map((item) => ({
+        ...item.toObject(),
+        entregaGeneralCampana: serializeCampaignDeliveryForDonor(
+          deliveryByCampaign.get(String(item.campana?._id || "")),
+          item.campana?._id || null
+        ),
+      })),
+    });
   } catch (error) {
     console.error(error);
-    return res.status(500).json({ msg: `❌ Error en el servidor - ${error}` });
+    return res.status(error.statusCode || 500).json({
+      msg: error.statusCode ? error.message : `❌ Error en el servidor - ${error}`,
+    });
   }
 };
 
@@ -615,22 +753,77 @@ const listarDonacionesPublic = async (_req, res) => {
   }
 };
 
+const serializeDonationStatusHistory = async (entries = []) => {
+  const historyByRole = new Map();
+  const modelsByRole = new Map([
+    ["admin", Admin],
+    ["donante", Donante],
+    ["recolector", Recolector],
+  ]);
+  const idsByRole = new Map();
+
+  for (const entry of entries) {
+    const role = String(entry.rolResponsable || "").toLowerCase();
+    const id = entry.responsable ? String(entry.responsable) : "";
+    if (!id || !modelsByRole.has(role)) continue;
+    if (!idsByRole.has(role)) idsByRole.set(role, new Set());
+    idsByRole.get(role).add(id);
+  }
+
+  await Promise.all([...idsByRole].map(async ([role, ids]) => {
+    const people = await modelsByRole.get(role)
+      .find({ _id: { $in: [...ids] } })
+      .select("_id nombre apellido")
+      .lean();
+    historyByRole.set(
+      role,
+      new Map(people.map((person) => [String(person._id), person]))
+    );
+  }));
+
+  return entries.map((entry) => {
+    const item = typeof entry.toObject === "function" ? entry.toObject() : { ...entry };
+    const role = String(item.rolResponsable || "").toLowerCase();
+    const person = item.responsable
+      ? historyByRole.get(role)?.get(String(item.responsable))
+      : null;
+    return {
+      ...item,
+      responsableDetalle: person
+        ? {
+            _id: person._id,
+            nombre: person.nombre,
+            apellido: person.apellido,
+          }
+        : null,
+    };
+  });
+};
+
 const leerDonacionQR = async (req, res) => {
   try {
     const user = req.user || req.donanteHeader;
     const role = String(user?.rol || "").toLowerCase();
     const codigo = String(req.body?.codigo ?? "").trim();
     const match = /^DONATY:(.+)$/i.exec(codigo);
-    const id = match?.[1]?.trim();
+    const id = String(req.params?.id ?? match?.[1] ?? "").trim();
 
     if (!id || !mongoose.Types.ObjectId.isValid(id)) {
-      return res.status(400).json({ msg: "Código QR inválido" });
+      return res.status(400).json({
+        msg: req.params?.id ? "El identificador de donación no es válido" : "Código QR inválido",
+      });
     }
 
     const donacion = await Donacion.findById(id)
-      .populate("campana", "nombre puntosRecoleccion")
+      .populate(
+        "campana",
+        "nombre descripcion fechaInicio fechaFin periodoAcademico horaInicio horaFin diasAtencion puntosRecoleccion"
+      )
       .populate("donante", "nombre apellido telefono")
-      .populate("recolector", "nombre apellido telefono");
+      .populate("recolector", "nombre apellido telefono")
+      .populate("evidencias.recolector", "nombre apellido")
+      .populate("historialRecolectores.recolectorAnterior", "nombre apellido")
+      .populate("historialRecolectores.recolectorNuevo", "nombre apellido");
 
     if (!donacion) {
       return res.status(404).json({ msg: "Donación no encontrada" });
@@ -639,15 +832,17 @@ const leerDonacionQR = async (req, res) => {
     const isAdmin = role === "admin";
     const isOwnerDonante = role === "donante" &&
       String(donacion.donante?._id ?? donacion.donante) === String(user._id);
-    const isAssignedRecolector = role === "recolector" &&
-      String(donacion.recolector?._id ?? donacion.recolector) === String(user._id);
+    const campaign = donacion.campana;
+    const point = campaign?.puntosRecoleccion?.id(donacion.puntoRecoleccionRef);
+    const isAssignedRecolector = role === "recolector" && (
+      String(donacion.recolector?._id ?? donacion.recolector) === String(user._id)
+      || isCollectorAssignedToPoint(point, user._id)
+    );
 
     if (!isAdmin && !isOwnerDonante && !isAssignedRecolector) {
       return res.status(403).json({ msg: "No tienes permiso para consultar esta donación" });
     }
 
-    const campaign = donacion.campana;
-    const point = campaign?.puntosRecoleccion?.id(donacion.puntoRecoleccionRef);
     const pointCollectorIds = (point?.recolectores || []).map((collectorId) => collectorId);
     const pointCollectors = pointCollectorIds.length
       ? await Recolector.find({ _id: { $in: pointCollectorIds } })
@@ -662,12 +857,9 @@ const leerDonacionQR = async (req, res) => {
       ? await Recolector.findById(responsibleId).select("nombre apellido status ubicacionGps").lean()
       : null;
     const gps = responsible?.ubicacionGps;
-    const gpsMatchesPoint =
-      String(gps?.campana || "") === String(campaign?._id || "")
-      && String(gps?.puntoRecoleccion || "") === String(point?._id || "");
     const locationState = classifyCollectorGeofenceState({
       collectorActive: responsible?.status !== false,
-      capturedAt: gps?.capturadoEn ?? gps?.actualizadoEn,
+      capturedAt: gps?.capturadoEn,
       latitude: gps?.latitud,
       longitude: gps?.longitud,
       accuracyMeters: gps?.precisionMetros,
@@ -676,19 +868,31 @@ const leerDonacionQR = async (req, res) => {
         && isInsideEpnCampus(gps.latitud, gps.longitud),
     });
     const gpsCoordinatesAvailable =
-      gpsMatchesPoint
+      Boolean(responsible)
       && locationState !== "inactivo"
       && hasValidCollectorCoordinates(gps?.latitud, gps?.longitud);
     const gpsFresh =
       gpsCoordinatesAvailable && ["dentro", "fuera"].includes(locationState);
-    const evidenciasPorEtapa = {
-      recepcion: donacion.evidencias.filter((evidence) => evidence.etapa === "recepcion"),
-      finalizacion: donacion.evidencias.filter((evidence) => evidence.etapa === "finalizacion"),
-      devolucion: donacion.evidencias.filter((evidence) => evidence.etapa === "devolucion"),
-    };
+    const evidenciasPorEtapa = serializeDonationEvidence(donacion.evidencias);
+    const donacionPayload = donacion.toObject();
+    donacionPayload.imagenUrl = urlPublica(donacionPayload.imagenUrl);
+    donacionPayload.evidencias = evidenciasPorEtapa;
+    const historialEstados = [...(donacion.historialEstados || [])]
+      .sort((left, right) => new Date(left.fecha) - new Date(right.fecha));
+    const historialEstadosConResponsable =
+      await serializeDonationStatusHistory(historialEstados);
+    const entregaGeneral = campaign?._id
+      ? await EntregaCampana.findOne({ campana: campaign._id })
+        .select("_id campana receptor nombresReceptor apellidosReceptor telefonoReceptor cargoReceptor descripcionBienes fechaEntrega responsablesCampana evidencias estado createdAt updatedAt")
+        .lean()
+      : null;
 
     return res.status(200).json({
-      donacion,
+      donacion: donacionPayload,
+      entregaGeneralCampana: serializeCampaignDeliveryForDonor(
+        entregaGeneral,
+        campaign?._id || null
+      ),
       evidenciasPorEtapa,
       puntoRecoleccion: serializeTracePickupPoint(point),
       recolectoresAsignadosAlPunto: pointCollectors,
@@ -696,22 +900,21 @@ const leerDonacionQR = async (req, res) => {
         ? { _id: responsible._id, nombre: responsible.nombre, apellido: responsible.apellido }
         : null,
       ubicacionResponsable: {
-        estado: !responsible || !gpsMatchesPoint
+        estado: !responsible
           ? "inactivo"
           : gpsFresh
           ? "activo"
           : locationState,
-        estadoGeografico: gpsMatchesPoint ? locationState : "inactivo",
+        estadoGeografico: responsible ? locationState : "inactivo",
         coordenadas: gpsCoordinatesAvailable
           ? { latitud: gps.latitud, longitud: gps.longitud }
           : null,
-        actualizadoEn: gpsMatchesPoint ? gps.actualizadoEn : null,
-        capturadoEn: gpsMatchesPoint
-          ? gps.capturadoEn ?? gps.actualizadoEn
+        actualizadoEn: responsible ? gps.actualizadoEn : null,
+        capturadoEn: responsible
+          ? gps.capturadoEn
           : null,
       },
-      historialEstados: [...(donacion.historialEstados || [])]
-        .sort((left, right) => new Date(left.fecha) - new Date(right.fecha)),
+      historialEstados: historialEstadosConResponsable,
       historialRecolectores: [...(donacion.historialRecolectores || [])]
         .sort((left, right) => new Date(left.fecha) - new Date(right.fecha)),
     });
@@ -723,11 +926,30 @@ const leerDonacionQR = async (req, res) => {
 
 const listarPendientesRecolector = async (req, res) => {
   try {
-    const items = await Donacion.find({
-      tipo: "fisica",
-      estado: "pendiente",
-      recolector: null,
-    })
+    const user = req.user;
+    if (!user) return res.status(401).json({ msg: "No autenticado" });
+
+    const campaigns = await Campana.find(
+      buildCurrentCollectorCampaignFilter({ collectorId: user._id })
+    )
+      .select("_id fechaInicio fechaFin horaInicio horaFin activa estado puntosRecoleccion")
+      .lean();
+    const campaignPoints = campaigns
+      .filter((campaign) => isCampaignAvailableNow(campaign))
+      .map((campaign) => ({
+        campaignId: campaign._id,
+        pointIds: (campaign.puntosRecoleccion || [])
+          .filter((point) =>
+            isPickupPointActive(point)
+            && isCollectorAssignedToPoint(point, user._id)
+          )
+          .map((point) => point._id),
+      }))
+      .filter(({ pointIds }) => pointIds.length > 0);
+
+    const items = await Donacion.find(
+      buildPendingCollectorDonationFilter({ campaignPoints })
+    )
       .sort({ createdAt: -1 })
       .populate("donante", "nombre apellido");
     return res.status(200).json({ items });
@@ -780,11 +1002,26 @@ const asignarRecolector = async (req, res) => {
         msg: "La donación no está disponible para asignación",
       });
     }
+    if (donacion.campana) {
+      const campaign = await Campana.findById(donacion.campana)
+        .select("puntosRecoleccion")
+        .lean();
+      const point = campaign?.puntosRecoleccion?.find(
+        (item) => String(item._id) === String(donacion.puntoRecoleccionRef)
+      );
+      if (!point || !isCollectorAssignedToPoint(point, user._id)) {
+        return res.status(403).json({
+          msg: "Solo un recolector asignado al punto puede autoasignarse esta donación",
+        });
+      }
+    }
 
     donacion.recolector = user._id;
     donacion.estado = "asignada";
     donacion.historialRecolectores.push({
       recolectorNuevo: user._id,
+      puntoRecoleccionNuevo: donacion.puntoRecoleccionRef || null,
+      estado: "asignada",
       fecha: new Date(),
       motivo: "Autoasignación por recolector",
     });
@@ -844,6 +1081,7 @@ const cambiarEstadoRecolector = (estadoActual, estadoNuevo, extras = () => ({}))
       if (!donacion) {
         return res.status(409).json({ msg: "La donación cambió mientras se procesaba la acción" });
       }
+      publishDonationEvent(req, "donation.status.updated", donacion);
       return res.status(200).json({ donacion });
     } catch (error) {
       console.error(error);
@@ -851,23 +1089,798 @@ const cambiarEstadoRecolector = (estadoActual, estadoNuevo, extras = () => ({}))
     }
   };
 
+const buildCollectionEvidence = (req, user) => {
+  const normalizeFiles = (value) =>
+    value == null ? [] : Array.isArray(value) ? value : [value];
+  const images = [
+    ...normalizeFiles(req.files?.imagen),
+    ...normalizeFiles(req.files?.imagenes),
+    ...normalizeFiles(req.files?.evidencias),
+  ];
+  const rawKey = String(req.get?.("Idempotency-Key") ?? "").trim()
+    || String(req.body?.idempotencyKey ?? "").trim();
+  const idempotencyKey = rawKey || `recolectada:${Date.now()}:${Math.random().toString(16).slice(2, 10)}`;
+
+  return {
+    image: images.length === 1 ? images[0] : null,
+    images,
+    idempotencyKey,
+    user,
+  };
+};
+
+const validateCollectionEvidence = (
+  { image, images = [], idempotencyKey },
+  { allowGeneratedKey = true } = {}
+) => {
+  if (!images.length && !image) {
+    throw Object.assign(
+      new Error("Debes adjuntar la evidencia fotográfica de la recolección"),
+      { statusCode: 400 }
+    );
+  }
+  if (!allowGeneratedKey && (!idempotencyKey || idempotencyKey.length > 128)) {
+    throw Object.assign(
+      new Error("Debes enviar un Idempotency-Key válido para la evidencia"),
+      { statusCode: 400 }
+    );
+  }
+  return true;
+};
+
+const normalizeReturnEvidenceFiles = (value) =>
+  value == null ? [] : Array.isArray(value) ? value : [value];
+
+const buildDonationReturnRequest = (req) => ({
+  etapa: String(req.body?.etapa ?? "").trim().toLowerCase(),
+  idempotencyKey: String(req.body?.idempotencyKey ?? "").trim()
+    || String(req.get?.("Idempotency-Key") ?? "").trim(),
+  images: normalizeReturnEvidenceFiles(req.files?.evidencias),
+});
+
+const validateDonationReturnRequest = ({ etapa, idempotencyKey, images }) => {
+  if (etapa !== "devolucion") {
+    throw Object.assign(
+      new Error('La etapa debe ser "devolucion"'),
+      { statusCode: 400 }
+    );
+  }
+  if (!idempotencyKey || idempotencyKey.length > 128) {
+    throw Object.assign(
+      new Error("Debes enviar un idempotencyKey válido (máximo 128 caracteres)"),
+      { statusCode: 400 }
+    );
+  }
+  if (!images.length) {
+    throw Object.assign(
+      new Error("Debes adjuntar al menos una imagen en el campo evidencias"),
+      { statusCode: 400 }
+    );
+  }
+  if (images.length > 2) {
+    throw Object.assign(
+      new Error("Puedes adjuntar hasta 2 evidencias por devolución"),
+      { statusCode: 400 }
+    );
+  }
+};
+
+const cambiarEstadoRecolectorConEvidencias = ({
+  estadoActual,
+  estadoNuevo,
+  operacion,
+  extras = () => ({}),
+}) => async (req, res) => {
+  const { images } = buildDonationReturnRequest(req);
+  let uploadedImages = [];
+  try {
+    const user = req.user || req.donanteHeader;
+    const { id } = req.params;
+    if (!user) return res.status(401).json({ msg: "No autenticado" });
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ msg: `ID inválido: ${id}` });
+    }
+
+    const evidenceRequest = buildDonationReturnRequest(req);
+    validateDonationReturnRequest(evidenceRequest);
+    const actual = await Donacion.findById(id)
+      .select("tipo recolector estado evidencias");
+    if (!actual) return res.status(404).json({ msg: "Donación no encontrada" });
+    if (actual.tipo !== "fisica") {
+      return res.status(400).json({ msg: "Solo aplica para donaciones físicas" });
+    }
+    if (!actual.recolector || String(actual.recolector) !== String(user._id)) {
+      return res.status(403).json({
+        msg: "Solo el recolector asignado puede cambiar el estado",
+      });
+    }
+
+    const alreadyProcessed = (actual.evidencias || []).some(
+      (evidence) => evidence.idempotencyKey === evidenceRequest.idempotencyKey
+        && evidence.etapa === "devolucion"
+        && evidence.operacion === operacion
+    );
+    if (alreadyProcessed) {
+      const current = await Donacion.findById(id)
+        .populate("recolector", "nombre apellido email telefono")
+        .populate("registradoPorRecolector", "nombre apellido email telefono")
+        .populate("campana", "nombre activa");
+      return res.status(200).json({
+        donacion: current,
+        evidencias: current.evidencias,
+        duplicada: true,
+      });
+    }
+    if (actual.estado !== estadoActual) {
+      return res.status(409).json({
+        msg: `Transición inválida: se esperaba "${estadoActual}" y la donación está "${actual.estado}"`,
+      });
+    }
+
+    for (const image of evidenceRequest.images) {
+      uploadedImages.push(
+        await uploadImage(image, "donaty/evidencias/devolucion")
+      );
+    }
+    const evidenceDate = new Date();
+    const evidencias = uploadedImages.map((uploadedImage) => ({
+      etapa: "devolucion",
+      operacion,
+      recolector: user._id,
+      fecha: evidenceDate,
+      ...uploadedImage,
+      idempotencyKey: evidenceRequest.idempotencyKey,
+    }));
+    const update = {
+      $set: { estado: estadoNuevo, ...extras(req) },
+      $push: {
+        evidencias: { $each: evidencias },
+        historialEstados: statusHistoryEntry(
+          estadoNuevo,
+          user,
+          req.body?.observaciones
+        ),
+      },
+    };
+    const donacion = await Donacion.findOneAndUpdate(
+      {
+        _id: id,
+        tipo: "fisica",
+        recolector: user._id,
+        estado: estadoActual,
+        evidencias: {
+          $not: {
+            $elemMatch: {
+              idempotencyKey: evidenceRequest.idempotencyKey,
+              etapa: "devolucion",
+              operacion,
+            },
+          },
+        },
+      },
+      update,
+      { new: true, runValidators: true }
+    )
+      .populate("recolector", "nombre apellido email telefono")
+      .populate("registradoPorRecolector", "nombre apellido email telefono")
+      .populate("campana", "nombre activa");
+
+    if (!donacion) {
+      const current = await Donacion.findById(id)
+        .select("estado evidencias")
+        .lean();
+      const duplicate = current?.evidencias?.some(
+        (evidence) => evidence.idempotencyKey === evidenceRequest.idempotencyKey
+          && evidence.etapa === "devolucion"
+          && evidence.operacion === operacion
+      );
+      await Promise.all(
+        uploadedImages.map((image) => deleteImage(image.imagenPublicId))
+      );
+      uploadedImages = [];
+      if (duplicate) {
+        const recovered = await Donacion.findById(id)
+          .populate("recolector", "nombre apellido email telefono")
+          .populate("registradoPorRecolector", "nombre apellido email telefono")
+          .populate("campana", "nombre activa");
+        return res.status(200).json({
+          donacion: recovered,
+          evidencias: recovered.evidencias,
+          duplicada: true,
+        });
+      }
+      return res.status(409).json({
+        msg: "La asignación o el estado cambió; no se registró la devolución",
+      });
+    }
+
+    uploadedImages = [];
+    publishDonationEvent(req, "donation.status.updated", donacion);
+    return res.status(200).json({
+      donacion,
+      evidencias: donacion.evidencias,
+      duplicada: false,
+    });
+  } catch (error) {
+    for (const image of uploadedImages) {
+      try {
+        await deleteImage(image.imagenPublicId);
+      } catch (cleanupError) {
+        console.error(
+          "No se pudo limpiar evidencia de devolución no registrada:",
+          cleanupError.message || cleanupError
+        );
+      }
+    }
+    console.error("Error registrando la devolución:", error.message || error);
+    return res.status(error.statusCode || 500).json({
+      msg: error.statusCode ? error.message : "Error al registrar la devolución",
+    });
+  } finally {
+    for (const image of images) {
+      if (!image?.tempFilePath) continue;
+      try {
+        await unlink(image.tempFilePath);
+      } catch (cleanupError) {
+        if (cleanupError.code !== "ENOENT") {
+          console.error(
+            "No se pudo limpiar el archivo temporal de devolución:",
+            cleanupError.message || cleanupError
+          );
+        }
+      }
+    }
+  }
+};
+
+const usesMultipartDonationReturn = (req) =>
+  Boolean(req.is?.("multipart/form-data"))
+  || req.files?.evidencias != null
+  || req.body?.etapa != null
+  || req.body?.idempotencyKey != null;
+
 const marcarPendienteRecoleccion = cambiarEstadoRecolector(
   "asignada",
   "pendiente_recoleccion"
 );
-const marcarRecolectada = cambiarEstadoRecolector(
-  "pendiente_recoleccion",
-  "recolectada"
-);
-const marcarClasificada = cambiarEstadoRecolector("recolectada", "clasificada");
-const iniciarEntrega = cambiarEstadoRecolector("clasificada", "en_entrega");
-const marcarEntregada = cambiarEstadoRecolector("en_entrega", "entregada");
-const solicitarDevolucion = cambiarEstadoRecolector(
-  "recolectada",
-  "devolucion",
-  (req) => ({ motivoDevolucion: String(req.body?.motivoDevolucion ?? "").trim() })
-);
-const confirmarDevolucion = cambiarEstadoRecolector("devolucion", "devuelta");
+const marcarRecolectada = async (req, res) => {
+  let uploadedImages = [];
+  let images = [];
+  try {
+    const user = req.user || req.donanteHeader;
+    const { id } = req.params;
+    if (!user) return res.status(401).json({ msg: "No autenticado" });
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ msg: `ID inválido: ${id}` });
+    }
+
+    const actual = await Donacion.findById(id).select("tipo recolector estado evidencias");
+    if (!actual) return res.status(404).json({ msg: "Donación no encontrada" });
+    if (actual.tipo !== "fisica") {
+      return res.status(400).json({ msg: "Solo aplica para donaciones físicas" });
+    }
+    if (!actual.recolector || String(actual.recolector) !== String(user._id)) {
+      return res.status(403).json({ msg: "Solo el recolector asignado puede marcar la donación como recolectada" });
+    }
+    if (actual.estado !== "pendiente_recoleccion") {
+      return res.status(409).json({
+        msg: `Transición inválida: se esperaba "pendiente_recoleccion" y la donación está "${actual.estado}"`,
+      });
+    }
+    const evidenceRequest = buildCollectionEvidence(req, user);
+    images = evidenceRequest.images.length
+      ? evidenceRequest.images
+      : evidenceRequest.image
+        ? [evidenceRequest.image]
+        : [];
+    validateCollectionEvidence(evidenceRequest, { allowGeneratedKey: true });
+
+    const idempotencyKey = evidenceRequest.idempotencyKey;
+    const duplicateEvidence = actual.evidencias.filter(
+      (entry) => entry.idempotencyKey === idempotencyKey
+    );
+    if (duplicateEvidence.length) {
+      const current = await Donacion.findById(id)
+        .populate("recolector", "nombre apellido email telefono")
+        .populate("registradoPorRecolector", "nombre apellido email telefono")
+        .populate("campana", "nombre activa");
+      return res.status(200).json({
+        donacion: current,
+        evidencias: current.evidencias,
+        duplicada: true,
+      });
+    }
+
+    for (const image of images) {
+      uploadedImages.push(
+        await uploadImage(image, "donaty/evidencias/recepcion")
+      );
+    }
+    const evidenceDate = new Date();
+    const evidence = uploadedImages.map((uploadedImage) => ({
+      etapa: "recepcion",
+      recolector: user._id,
+      fecha: evidenceDate,
+      ...uploadedImage,
+      idempotencyKey,
+    }));
+
+    const donacion = await Donacion.findOneAndUpdate(
+      {
+        _id: id,
+        tipo: "fisica",
+        recolector: user._id,
+        estado: "pendiente_recoleccion",
+        "evidencias.idempotencyKey": { $ne: idempotencyKey },
+      },
+      {
+        $set: { estado: "recolectada" },
+        $push: {
+          evidencias: { $each: evidence },
+          historialEstados: statusHistoryEntry("recolectada", user),
+        },
+      },
+      { new: true, runValidators: true }
+    )
+      .populate("recolector", "nombre apellido email telefono")
+      .populate("registradoPorRecolector", "nombre apellido email telefono")
+      .populate("campana", "nombre activa");
+
+    if (!donacion) {
+      const current = await Donacion.findById(id).select("estado evidencias");
+      const currentEvidence = (current?.evidencias || []).filter(
+        (entry) => entry.idempotencyKey === idempotencyKey
+      );
+      if (currentEvidence.length) {
+        await Promise.all(
+          uploadedImages.map((image) => deleteImage(image.imagenPublicId))
+        );
+        uploadedImages = [];
+        const recovered = await Donacion.findById(id)
+          .populate("recolector", "nombre apellido email telefono")
+          .populate("registradoPorRecolector", "nombre apellido email telefono")
+          .populate("campana", "nombre activa");
+        return res.status(200).json({
+          donacion: recovered,
+          evidencias: recovered.evidencias,
+          duplicada: true,
+        });
+      }
+      await Promise.all(
+        uploadedImages.map((image) => deleteImage(image.imagenPublicId))
+      );
+      uploadedImages = [];
+      return res.status(409).json({ msg: "La donación cambió mientras se procesaba la acción" });
+    }
+
+    uploadedImages = [];
+    publishDonationEvent(req, "donation.status.updated", donacion);
+    return res.status(200).json({
+      donacion,
+      evidencias: donacion.evidencias,
+    });
+  } catch (error) {
+    for (const image of uploadedImages) {
+      try {
+        await deleteImage(image.imagenPublicId);
+      } catch (cleanupError) {
+        console.warn("No se pudo limpiar la imagen de recolección:", cleanupError.message || cleanupError);
+      }
+    }
+    console.error(error);
+    return res.status(error.statusCode || 500).json({
+      msg: error.statusCode ? error.message : `❌ Error en el servidor - ${error}`,
+    });
+  } finally {
+    for (const image of images) {
+      if (!image?.tempFilePath) continue;
+      try {
+        await unlink(image.tempFilePath);
+      } catch (cleanupError) {
+        if (cleanupError.code !== "ENOENT") {
+          console.error("No se pudo limpiar el archivo temporal de recolección:", cleanupError.message || cleanupError);
+        }
+      }
+    }
+  }
+};
+const marcarClasificada = async (req, res) => {
+  try {
+    const user = req.user || req.donanteHeader;
+    const { id } = req.params;
+    if (!user?._id) return res.status(401).json({ msg: "No autenticado" });
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ msg: "El identificador de donación no es válido" });
+    }
+
+    const actual = await Donacion.findById(id).select(
+      "tipo recolector estado campana puntoRecoleccionRef clasificacionId categoria subcategoria nombreBien metadata"
+    );
+    if (!actual) return res.status(404).json({ msg: "Donación no encontrada" });
+    if (actual.tipo !== "fisica") {
+      return res.status(400).json({ msg: "Solo aplica para donaciones físicas" });
+    }
+    if (String(actual.recolector) !== String(user._id)) {
+      return res.status(403).json({
+        msg: "Solo el recolector asignado puede clasificar esta donación",
+      });
+    }
+    const campaign = await Campana.findById(actual.campana)
+      .select("_id puntosRecoleccion")
+      .lean();
+    if (!campaign) return res.status(404).json({ msg: "La campaña de la donación no existe" });
+    const resolvedPointId = resolverPuntoId(
+      user,
+      req.body?.puntoId,
+      campaign,
+      actual.puntoRecoleccionRef
+    );
+    if (actual.estado !== "recolectada") {
+      return res.status(409).json({
+        msg: `Transición inválida: se esperaba "recolectada" y la donación está "${actual.estado}"`,
+      });
+    }
+
+    const classifiedAt = new Date();
+    const productosClasificados = normalizeClassifiedProducts(
+      req.body?.productosClasificados,
+      actual,
+      user._id,
+      classifiedAt
+    );
+    const suppliedClassification = req.body?.clasificacion;
+    const clasificacionId = req.body?.clasificacionId
+      ?? (suppliedClassification && typeof suppliedClassification === "object"
+        ? suppliedClassification._id ?? suppliedClassification.id
+        : null);
+    if (clasificacionId && !mongoose.isValidObjectId(clasificacionId)) {
+      return res.status(400).json({
+        msg: "El identificador de clasificación no es válido",
+      });
+    }
+    const explicitClassificationName = req.body?.clasificacionNombre
+      ?? req.body?.nombre
+      ?? (typeof suppliedClassification === "string"
+        ? suppliedClassification
+        : suppliedClassification?.nombre);
+    const clasificacionNombre = explicitClassificationName
+      ?? (clasificacionId ? undefined : productosClasificados[0]?.categoria);
+    const clasificacion = await resolveDonationClassification({
+      campaignId: actual.campana,
+      pointId: resolvedPointId,
+      classificationId: clasificacionId || null,
+      classificationName: clasificacionNombre,
+    });
+    const donacion = await Donacion.findOneAndUpdate(
+      {
+        _id: id,
+        tipo: "fisica",
+        recolector: user._id,
+        estado: "recolectada",
+      },
+      {
+        $set: {
+          estado: "en_entrega",
+          clasificacionId: clasificacion._id,
+          productosClasificados,
+        },
+        $push: {
+          historialEstados: statusHistoryEntry("en_entrega", user),
+        },
+      },
+      { new: true, runValidators: true }
+    )
+      .populate("recolector", "nombre apellido email telefono")
+      .populate("registradoPorRecolector", "nombre apellido email telefono")
+      .populate("campana", "nombre activa");
+
+    if (!donacion) {
+      return res.status(409).json({
+        msg: "La donación cambió mientras se procesaba la clasificación",
+      });
+    }
+    publishDonationEvent(req, "donation.status.updated", donacion);
+    const classifiedDonations = await Donacion.find({
+      campana: actual.campana,
+      puntoRecoleccionRef: actual.puntoRecoleccionRef,
+      clasificacionId: clasificacion._id,
+    }).select("metadata cantidad").lean();
+    const total = classifiedDonations.reduce((sum, donation) => {
+      const quantity = Number(donation.metadata?.cantidad ?? donation.cantidad);
+      return Number.isSafeInteger(quantity) && quantity > 0
+        ? sum + quantity
+        : sum;
+    }, 0);
+    return res.status(200).json({
+      donacion,
+      clasificacion: {
+        id: String(clasificacion._id),
+        nombre: clasificacion.nombre,
+        total,
+      },
+    });
+  } catch (error) {
+    console.error("Error clasificando donación:", error.message || error);
+    return res.status(error.statusCode || 500).json({
+      msg: error.statusCode ? error.message : "Error al clasificar la donación",
+    });
+  }
+};
+const iniciarEntrega = async (req, res) => {
+  try {
+    const user = req.user || req.donanteHeader;
+    const { id } = req.params;
+    if (!user?._id) return res.status(401).json({ msg: "No autenticado" });
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({ msg: `ID inválido: ${id}` });
+    }
+
+    const donation = await Donacion.findById(id).select("tipo recolector estado");
+    if (!donation) return res.status(404).json({ msg: "Donación no encontrada" });
+    if (donation.tipo !== "fisica") {
+      return res.status(400).json({ msg: "Solo aplica para donaciones físicas" });
+    }
+    if (String(donation.recolector) !== String(user._id)) {
+      return res.status(403).json({
+        msg: "Solo el recolector asignado puede cambiar el estado",
+      });
+    }
+    if (donation.estado === "en_entrega") {
+      const current = await Donacion.findById(id)
+        .populate("recolector", "nombre apellido email telefono")
+        .populate("registradoPorRecolector", "nombre apellido email telefono")
+        .populate("campana", "nombre activa");
+      return res.status(200).json({ donacion: current });
+    }
+    if (donation.estado !== "clasificada") {
+      return res.status(409).json({
+        msg: `Transición inválida: se esperaba "clasificada" y la donación está "${donation.estado}"`,
+      });
+    }
+
+    const updated = await Donacion.findOneAndUpdate(
+      {
+        _id: id,
+        tipo: "fisica",
+        recolector: user._id,
+        estado: "clasificada",
+      },
+      {
+        $set: { estado: "en_entrega" },
+        $push: {
+          historialEstados: statusHistoryEntry("en_entrega", user),
+        },
+      },
+      { new: true, runValidators: true }
+    )
+      .populate("recolector", "nombre apellido email telefono")
+      .populate("registradoPorRecolector", "nombre apellido email telefono")
+      .populate("campana", "nombre activa");
+    if (!updated) {
+      return res.status(409).json({
+        msg: "La donación cambió mientras se procesaba la acción",
+      });
+    }
+    publishDonationEvent(req, "donation.status.updated", updated);
+    return res.status(200).json({ donacion: updated });
+  } catch (error) {
+    console.error("Error iniciando la entrega de donación:", error.message || error);
+    return res.status(500).json({ msg: "Error al iniciar la entrega de la donación" });
+  }
+};
+const marcarEntregada = async (req, res) => {
+  const image = !Array.isArray(req.files?.imagen) ? req.files?.imagen : null;
+  let uploadedImage = null;
+  try {
+    const user = req.user || req.donanteHeader;
+    const { id } = req.params;
+    const nombresReceptor = String(req.body?.nombresReceptor ?? "").trim();
+    const apellidosReceptor = String(req.body?.apellidosReceptor ?? "").trim();
+    const telefonoReceptor = String(req.body?.telefonoReceptor ?? "").trim();
+    const cargoReceptor = String(req.body?.cargoReceptor ?? "").trim();
+    const descripcionBienes = String(req.body?.descripcionBienes ?? "").trim();
+    const idempotencyKey = String(
+      req.get("Idempotency-Key") ?? req.body?.idempotencyKey ?? ""
+    ).trim();
+
+    if (!user?._id) return res.status(401).json({ msg: "No autenticado" });
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ msg: "El identificador de donación no es válido" });
+    }
+    if (
+      !nombresReceptor
+      || nombresReceptor.length > 120
+      || !apellidosReceptor
+      || apellidosReceptor.length > 120
+      || !cargoReceptor
+      || cargoReceptor.length > 120
+      || !descripcionBienes
+      || descripcionBienes.length > 2000
+    ) {
+      return res.status(400).json({
+        msg: "Completa nombres, apellidos, cargo y descripción de los bienes (máximo 120/2000 caracteres)",
+      });
+    }
+    if (!/^\+?[0-9\s()-]{7,20}$/.test(telefonoReceptor)) {
+      return res.status(400).json({ msg: "El teléfono de quien recibe no es válido" });
+    }
+    if (!idempotencyKey || idempotencyKey.length > 128) {
+      return res.status(400).json({ msg: "Debes enviar una clave de entrega válida" });
+    }
+    if (!image) {
+      return res.status(400).json({ msg: "Debes adjuntar una fotografía de la entrega" });
+    }
+
+    const actual = await Donacion.findById(id).select(
+      "tipo recolector estado entregas campana"
+    );
+    if (!actual) return res.status(404).json({ msg: "Donación no encontrada" });
+    if (actual.tipo !== "fisica") {
+      return res.status(400).json({ msg: "Solo aplica para donaciones físicas" });
+    }
+    if (String(actual.recolector) !== String(user._id)) {
+      return res.status(403).json({
+        msg: "Solo el recolector asignado puede registrar la entrega",
+      });
+    }
+    const previousDelivery = actual.entregas.find(
+      (delivery) => delivery.idempotencyKey === idempotencyKey
+    );
+    if (actual.estado === "entregada" && previousDelivery) {
+      const current = await Donacion.findById(id).populate(
+        "recolector",
+        "nombre apellido email telefono"
+      ).populate("campana", "nombre activa");
+      return res.status(200).json({ donacion: current, duplicada: true });
+    }
+    if (actual.estado !== "en_entrega") {
+      return res.status(409).json({
+        msg: `Transición inválida: se esperaba "en_entrega" y la donación está "${actual.estado}"`,
+      });
+    }
+    if (actual.campana) {
+      const campaign = await Campana.findById(actual.campana)
+        .select("_id estado activa fechaFin")
+        .lean();
+      if (campaign && isCampaignFinished(campaign)) {
+        const [totalDonations, notReadyCount] = await Promise.all([
+          Donacion.countDocuments({ campana: actual.campana }),
+          Donacion.countDocuments({
+            campana: actual.campana,
+            estado: { $ne: "en_entrega" },
+          }),
+        ]);
+        if (totalDonations > 0 && notReadyCount === 0) {
+          return res.status(409).json({
+            msg: "La campaña finalizada debe entregarse mediante la entrega general de campaña",
+          });
+        }
+      }
+    }
+
+    uploadedImage = await uploadImage(image, "donaty/evidencias/finalizacion");
+    const deliveredAt = new Date();
+    const delivery = {
+      nombresReceptor,
+      apellidosReceptor,
+      telefonoReceptor,
+      cargoReceptor,
+      descripcionBienes,
+      recolector: user._id,
+      fecha: deliveredAt,
+      ...uploadedImage,
+      idempotencyKey,
+    };
+    const updated = await Donacion.findOneAndUpdate(
+      {
+        _id: id,
+        tipo: "fisica",
+        recolector: user._id,
+        estado: "en_entrega",
+        "entregas.idempotencyKey": { $ne: idempotencyKey },
+      },
+      {
+        $set: { estado: "entregada" },
+        $push: {
+          entregas: delivery,
+          evidencias: {
+            etapa: "finalizacion",
+            recolector: user._id,
+            fecha: deliveredAt,
+            ...uploadedImage,
+            idempotencyKey,
+          },
+          historialEstados: statusHistoryEntry("entregada", user),
+        },
+      },
+      { new: true, runValidators: true }
+    )
+      .populate("recolector", "nombre apellido email telefono")
+      .populate("registradoPorRecolector", "nombre apellido email telefono")
+      .populate("campana", "nombre activa");
+
+    if (!updated) {
+      const current = await Donacion.findById(id).select("estado entregas");
+      const duplicate = current?.entregas.find(
+        (entry) => entry.idempotencyKey === idempotencyKey
+      );
+      if (duplicate) {
+        await deleteImage(uploadedImage.imagenPublicId);
+        uploadedImage = null;
+        const donation = await Donacion.findById(id).populate(
+          "recolector",
+          "nombre apellido email telefono"
+        ).populate("campana", "nombre activa");
+        return res.status(200).json({ donacion: donation, duplicada: true });
+      }
+      return res.status(409).json({
+        msg: "La asignación o el estado cambió; no se registró la entrega",
+      });
+    }
+
+    uploadedImage = null;
+    publishDonationEvent(req, "donation.status.updated", updated);
+    return res.status(200).json({ donacion: updated, duplicada: false });
+  } catch (error) {
+    if (uploadedImage?.imagenPublicId) {
+      try {
+        await deleteImage(uploadedImage.imagenPublicId);
+      } catch (cleanupError) {
+        console.error(
+          "No se pudo limpiar la imagen de entrega no registrada:",
+          cleanupError.message || cleanupError
+        );
+      }
+    }
+    console.error("Error registrando la entrega:", error.message || error);
+    return res.status(error.statusCode || 500).json({
+      msg: error.statusCode ? error.message : "Error al registrar la entrega",
+    });
+  } finally {
+    if (image?.tempFilePath) {
+      try {
+        await unlink(image.tempFilePath);
+      } catch (cleanupError) {
+        if (cleanupError.code !== "ENOENT") {
+          console.error(
+            "No se pudo limpiar el archivo temporal de entrega:",
+            cleanupError.message || cleanupError
+          );
+        }
+      }
+    }
+  }
+};
+const solicitarDevolucion = (req, res) => {
+  const handler = usesMultipartDonationReturn(req)
+    ? cambiarEstadoRecolectorConEvidencias({
+        estadoActual: "recolectada",
+        estadoNuevo: "devolucion",
+        operacion: "solicitarDevolucion",
+        extras: (request) => ({
+          motivoDevolucion: String(request.body?.motivoDevolucion ?? "").trim(),
+        }),
+      })
+    : cambiarEstadoRecolector(
+        "recolectada",
+        "devolucion",
+        (request) => ({
+          motivoDevolucion: String(request.body?.motivoDevolucion ?? "").trim(),
+        })
+      );
+  return handler(req, res);
+};
+
+const confirmarDevolucion = (req, res) => {
+  const handler = usesMultipartDonationReturn(req)
+    ? cambiarEstadoRecolectorConEvidencias({
+        estadoActual: "devolucion",
+        estadoNuevo: "devuelta",
+        operacion: "confirmarDevolucion",
+      })
+    : cambiarEstadoRecolector("devolucion", "devuelta");
+  return handler(req, res);
+};
 
 const actualizarEstado = async (req, res) => {
   try {
@@ -1159,11 +2172,18 @@ const eliminarDonacionAdmin = async (req, res) => {
 export {
   crearDonacion,
   crearDonacionRecolector,
+  resolveDonationRegistrationError,
+  getCampaignDonationRegistrationError,
   listarMisDonaciones,
   listarDonaciones,
   listarPendientesRecolector,
   listarAsignadasRecolector,
   asignarRecolector,
+  buildCollectionEvidence,
+  validateCollectionEvidence,
+  buildDonationReturnRequest,
+  usesMultipartDonationReturn,
+  validateDonationReturnRequest,
   marcarRecolectada,
   marcarPendienteRecoleccion,
   marcarClasificada,

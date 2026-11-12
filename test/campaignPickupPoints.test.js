@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { normalizePickupPoints } from "../src/controllers/campana_controller.js";
 import {
+  buildPointCollectorAssignmentFilter,
   buildPickupPointsResponse,
   serializeCollectorAssignments,
   serializePickupPoints,
@@ -71,6 +72,42 @@ test("requires building, floor and classroom without requiring weekly schedules"
     aula: "203",
   }], [], true);
   assert.deepEqual(point.horariosAtencion, []);
+});
+
+test("requires a principal for new point configuration and stores supports separately", () => {
+  const principal = "507f1f77bcf86cd799439021";
+  const support = "507f1f77bcf86cd799439022";
+  const [point] = normalizePickupPoints([{
+    ...mobilePayload,
+    responsableRecolector: principal,
+    recolectoresSecundarios: [support],
+  }], [], true, true);
+
+  assert.equal(String(point.responsableRecolector), principal);
+  assert.deepEqual(point.recolectores.map(String), [principal, support]);
+  assert.throws(
+    () => normalizePickupPoints([mobilePayload], [], true, true),
+    { statusCode: 400, message: "Debes asignar un recolector principal al punto" }
+  );
+  assert.throws(
+    () => normalizePickupPoints([{
+      ...mobilePayload,
+      responsableRecolector: principal,
+      recolectoresSecundarios: [principal],
+    }], [], true, true),
+    { statusCode: 409 }
+  );
+});
+
+test("accepts a principal without requiring secondary collectors", () => {
+  const principal = "507f1f77bcf86cd799439021";
+  const [point] = normalizePickupPoints([{
+    ...mobilePayload,
+    responsableRecolector: principal,
+  }], [], true, true);
+
+  assert.equal(String(point.responsableRecolector), principal);
+  assert.deepEqual(point.recolectores.map(String), [principal]);
 });
 
 test("persists multiple non-overlapping weekly point hours", () => {
@@ -173,6 +210,20 @@ test("serializes active mobile points with IDs, campaign and location fields", (
   assert.equal("recolectores" in responsePoint, false);
 });
 
+test("admin point serialization separates the required principal from support collectors", () => {
+  const principal = "507f1f77bcf86cd799439011";
+  const support = "507f1f77bcf86cd799439012";
+  const [point] = normalizePickupPoints([{
+    nombre: "Entrada norte",
+    responsableRecolector: principal,
+    recolectoresSecundarios: [support],
+  }]);
+  const [serialized] = serializePickupPoints([point], "campaign-id");
+
+  assert.equal(String(serialized.responsableRecolector), principal);
+  assert.deepEqual(serialized.recolectoresSecundarios, [support]);
+});
+
 test("does not return inactive points in the mobile active-points response", () => {
   const points = normalizePickupPoints([
     { nombre: "Punto activo" },
@@ -253,7 +304,85 @@ test("serializes only active points assigned to the collector", () => {
     horariosAtencion: [],
     direccion: "Campus principal",
     referenciasLugar: "Puerta lateral",
+    rol: "principal",
+    fechaAsignacion: null,
+    punto: {
+      _id: "507f1f77bcf86cd799439011",
+      id: "507f1f77bcf86cd799439011",
+      nombre: "Facultad de Ingeniería",
+      edificioId: 16,
+      nombreEdificio: "Facultad de Ingeniería",
+      edificio: "16 - Facultad de Ingeniería",
+      piso: "2",
+      aula: "203",
+      latitud: -0.210145,
+      longitud: -78.488712,
+      direccion: "Campus principal",
+      referenciasLugar: "Puerta lateral",
+      horariosAtencion: [],
+    },
   }]);
+});
+
+test("serializes the persisted assignment date and time for mobile collector assignments", () => {
+  const assignedAt = new Date("2026-11-07T21:15:30.000Z");
+  const collectorId = "507f1f77bcf86cd799439021";
+  const pointId = "507f1f77bcf86cd799439011";
+  const assignments = serializeCollectorAssignments([{
+    _id: "507f1f77bcf86cd799439031",
+    nombre: "Campaña de prueba",
+    puntosRecoleccion: [{
+      _id: pointId,
+      nombre: "Punto uno",
+      responsableRecolector: collectorId,
+      recolectores: [collectorId],
+    }],
+    historialAsignacionesRecolectores: [{
+      recolector: collectorId,
+      puntoNuevo: pointId,
+      fecha: assignedAt,
+      vigente: true,
+    }],
+  }], collectorId);
+
+  assert.equal(assignments[0].fechaAsignacion, assignedAt.toISOString());
+});
+
+test("collector assignments include campaigns where the collector is stored only as principal", () => {
+  const collectorId = "507f1f77bcf86cd799439021";
+  const campaigns = ["one", "two", "three"].map((suffix) => ({
+    _id: `campaign-${suffix}`,
+    nombre: `Campaña ${suffix}`,
+    puntosRecoleccion: [{
+      _id: `point-${suffix}`,
+      nombre: `Punto ${suffix}`,
+      responsableRecolector: collectorId,
+      recolectores: [],
+    }],
+  }));
+
+  const assignments = serializeCollectorAssignments(campaigns, collectorId);
+
+  assert.equal(assignments.length, 3);
+  assert.deepEqual(assignments.map((assignment) => assignment.fechaAsignacion), [
+    null,
+    null,
+    null,
+  ]);
+  assert.deepEqual(assignments.map((assignment) => assignment.rol), [
+    "principal",
+    "principal",
+    "principal",
+  ]);
+});
+
+test("campaign point assignment query includes the principal and secondary relation", () => {
+  assert.deepEqual(buildPointCollectorAssignmentFilter("collector-1"), {
+    $or: [
+      { recolectores: "collector-1" },
+      { responsableRecolector: "collector-1" },
+    ],
+  });
 });
 
 test("serializes trace point details and coordinates without adding missing data", () => {

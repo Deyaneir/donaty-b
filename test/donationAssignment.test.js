@@ -72,14 +72,32 @@ test("rejects assignment when no active point has an available assigned collecto
   );
 });
 
+test("includes a legacy point principal even when absent from the secondary list", () => {
+  const selected = chooseBalancedAssignment({
+    points: [{
+      _id: "point-legacy",
+      activo: true,
+      responsableRecolector: "collector-a",
+      recolectores: [],
+    }],
+    collectors: [collectors[0]],
+  });
+  assert.equal(selected.collector._id, "collector-a");
+});
+
 const createTransactionalModels = () => {
   const campaign = {
     _id: "campaign-a",
     activa: true,
+    fechaInicio: new Date("2000-01-01T00:00:00.000Z"),
+    fechaFin: new Date("2099-12-31T00:00:00.000Z"),
+    horaInicio: "00:00",
+    horaFin: "23:59",
     puntosRecoleccion: structuredClone(points),
     assignmentVersion: 0,
   };
   const donations = [];
+  let deliveryExists = false;
   let transactionTail = Promise.resolve();
 
   const query = (resolve) => ({
@@ -114,7 +132,16 @@ const createTransactionalModels = () => {
       },
     },
     collectorModel: {
-      find: () => query(() => collectors),
+      find: (filter) => query(() => {
+        if (typeof filter?._id === "string") {
+          return collectors.filter((collector) => collector._id === filter._id);
+        }
+        return collectors;
+      }),
+    },
+    deliveryModel: {
+      exists: () => query(() => deliveryExists),
+      setExists(value) { deliveryExists = value; },
     },
     donationModel: {
       aggregate: () => query(() => {
@@ -203,6 +230,95 @@ test("does not count cancelled or completed donations toward assignment load", a
   });
 
   assert.equal(result.asignacion.puntoRecoleccion._id, "point-a");
+});
+
+test("keeps a collector-created donation within its selected point", async () => {
+  const models = createTransactionalModels();
+  const result = await createDonationWithAssignment({
+    campaignId: models.campaign._id,
+    pointId: "point-b",
+    ...models,
+    randomInt: () => 0,
+    buildDonation: ({ campaign, point, collector }) => ({
+      campana: campaign._id,
+      puntoRecoleccionRef: point._id,
+      recolector: collector._id,
+    }),
+  });
+
+  assert.equal(result.asignacion.puntoRecoleccion._id, "point-b");
+  assert.equal(result.donacion.puntoRecoleccionRef, "point-b");
+  assert.equal(result.donacion.recolector, "collector-b");
+});
+
+test("a collector cannot register a donation for a point they are not assigned to", async () => {
+  const models = createTransactionalModels();
+
+  await assert.rejects(
+    createDonationWithAssignment({
+      campaignId: models.campaign._id,
+      pointId: "point-b",
+      requestingCollectorId: "collector-a",
+      ...models,
+      buildDonation: () => ({}),
+    }),
+    { statusCode: 403 }
+  );
+  assert.equal(models.donations.length, 0);
+});
+
+test("a collector-created donation stays assigned to the authenticated collector", async () => {
+  const models = createTransactionalModels();
+  const result = await createDonationWithAssignment({
+    campaignId: models.campaign._id,
+    pointId: "point-a",
+    requestingCollectorId: "collector-a",
+    ...models,
+    randomInt: () => 0,
+    buildDonation: ({ campaign, point, collector }) => ({
+      campana: campaign._id,
+      puntoRecoleccionRef: point._id,
+      recolector: collector._id,
+      estado: "asignada",
+    }),
+  });
+
+  assert.equal(result.donacion.recolector, "collector-a");
+  assert.equal(result.asignacion.recolector._id, "collector-a");
+  assert.equal(result.donacion.historialRecolectores[0].estado, "asignada");
+});
+
+test("a collector cannot register a donation before the campaign participation dates", async () => {
+  const models = createTransactionalModels();
+  models.campaign.fechaInicio = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000);
+
+  await assert.rejects(
+    createDonationWithAssignment({
+      campaignId: models.campaign._id,
+      requestingCollectorId: "collector-a",
+      ...models,
+      buildDonation: () => ({}),
+    }),
+    {
+      statusCode: 409,
+      message: "La campaña no está dentro de su fecha y horario de disponibilidad",
+    }
+  );
+  assert.equal(models.donations.length, 0);
+});
+
+test("blocks new donation registrations after a campaign delivery exists", async () => {
+  const models = createTransactionalModels();
+  models.deliveryModel.setExists(true);
+
+  await assert.rejects(
+    createDonationWithAssignment({
+      campaignId: models.campaign._id,
+      ...models,
+      buildDonation: () => ({}),
+    }),
+    { statusCode: 409, message: "La campaña ya tiene una entrega general registrada" }
+  );
 });
 
 test("returns a service-unavailable error when MongoDB transactions are unsupported", async () => {

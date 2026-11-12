@@ -2,10 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   countAssignedCollectors,
+  getPointCollectorIds,
   campaignDateRangesOverlap,
   validateCampaignCapacity,
   validateCampaignPointCapacity,
   validateCampaignHours,
+  normalizeCampaignDays,
   resolveCampaignState,
 } from "../src/controllers/campana_controller.js";
 
@@ -21,7 +23,27 @@ test("campaign collector capacity counts unique collectors across points", () =>
   });
   assert.throws(() => validateCampaignCapacity(2, points, 1), {
     statusCode: 409,
+    message: /usa la reasignación; no lo retires directamente/,
   });
+  assert.doesNotThrow(() => validateCampaignCapacity(2, points));
+});
+
+test("campaign capacity counts a point principal even if legacy data omits it from recolectores", () => {
+  const principal = "507f1f77bcf86cd799439011";
+  const support = "507f1f77bcf86cd799439012";
+  const points = [{
+    responsableRecolector: principal,
+    recolectores: [support, principal],
+  }, {
+    responsableRecolector: principal,
+    recolectores: [],
+  }];
+
+  assert.deepEqual(getPointCollectorIds({
+    responsableRecolector: principal,
+    recolectores: [],
+  }), [principal]);
+  assert.equal(countAssignedCollectors(points), 2);
   assert.doesNotThrow(() => validateCampaignCapacity(2, points));
 });
 
@@ -82,6 +104,14 @@ test("campaign hours require a strict valid range and accept 09:00 to 23:00", ()
   assert.throws(() => validateCampaignHours("09:00", "08:59"), { statusCode: 400 });
 });
 
+test("campaign days are required, unique and restricted to ISO weekdays", () => {
+  assert.deepEqual(normalizeCampaignDays([1, "3", 1, 7]), [1, 3, 7]);
+  assert.deepEqual(normalizeCampaignDays([]), []);
+  assert.deepEqual(normalizeCampaignDays('["1",2,7]'), [1, 2, 7]);
+  assert.deepEqual(normalizeCampaignDays(undefined), []);
+  assert.throws(() => normalizeCampaignDays([0, 8]), { statusCode: 400 });
+});
+
 test("campaign states distinguish drafts, active campaigns and finished campaigns", () => {
   const now = new Date("2026-11-04T12:00:00.000Z");
   assert.equal(resolveCampaignState({ activa: false }, now), "borrador");
@@ -110,6 +140,24 @@ test("campaign states distinguish drafts, active campaigns and finished campaign
       estado: "desactivada",
       fechaFin: "2026-11-02T00:00:00.000Z",
     }, now),
+    "finalizada"
+  );
+});
+
+test("campaign state changes at its Ecuador-local closing time", () => {
+  const campaign = {
+    activa: true,
+    estado: "activa",
+    fechaFin: new Date("2026-11-08T00:00:00.000Z"),
+    horaInicio: "09:00",
+    horaFin: "17:00",
+  };
+  assert.equal(
+    resolveCampaignState(campaign, new Date("2026-11-08T22:00:00.000Z")),
+    "activa"
+  );
+  assert.equal(
+    resolveCampaignState(campaign, new Date("2026-11-08T22:00:01.000Z")),
     "finalizada"
   );
 });

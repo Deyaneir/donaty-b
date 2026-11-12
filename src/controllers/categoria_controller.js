@@ -4,6 +4,15 @@ import Campana from "../models/Campana.js";
 import Donacion from "../models/Donacion.js";
 import { normalizeCategoryName } from "../utils/categoryCatalog.js";
 import { normalizeFieldConfiguration } from "../utils/categoryFields.js";
+import {
+  buildCurrentCollectorCampaignFilter,
+  isCollectorAssignedToCampaign,
+} from "../utils/collectorHistory.js";
+import { isCampaignAvailableNow } from "../utils/campaignSchedule.js";
+import {
+  donorHasCampaignDonations,
+  listDonatedCampaignIds,
+} from "../utils/donorCampaignHistory.js";
 
 const validarClaveVisual = (value) =>
   value === "" || /^[a-zA-Z0-9_-]{1,64}$/.test(value);
@@ -180,22 +189,79 @@ const crearCategoriaEnCampana = async (req, res, campaignId) => {
 
 const listarCategorias = async (req, res) => {
   try {
-    const filtro = { activa: true };
+    const rol = String(req.user?.rol || "").toLowerCase();
+    const historicalCampaignIds = new Set();
+    let filtro = { activa: true };
     if (req.query.campana !== undefined && req.query.campana !== "") {
       const campana = await obtenerCampana(req.query.campana);
-      if (!campana.activa) {
+      const donorHistoryAccess = rol === "donante"
+        && await donorHasCampaignDonations(req.user?._id, campana._id);
+      if (
+        rol !== "admin"
+        && (!donorHistoryAccess && !isCampaignAvailableNow(campana)
+          || (rol === "recolector"
+            && !isCollectorAssignedToCampaign(campana, req.user?._id)))
+      ) {
         return res.status(404).json({ msg: "La campaña no existe o está inactiva" });
       }
       filtro.campana = campana._id;
+      if (donorHistoryAccess) {
+        filtro = { campana: campana._id };
+        historicalCampaignIds.add(String(campana._id));
+      }
     } else {
-      const campanasActivas = await Campana.find({ activa: true }).distinct("_id");
-      filtro.campana = { $in: campanasActivas };
+      const donatedCampaignIds = rol === "donante"
+        ? await listDonatedCampaignIds(req.user?._id)
+        : [];
+      donatedCampaignIds.forEach((id) => historicalCampaignIds.add(String(id)));
+      const campaigns = rol === "admin"
+        ? await Campana.find({ activa: true }).select("_id").lean()
+        : await Campana.find(
+            rol === "recolector"
+              ? buildCurrentCollectorCampaignFilter({ collectorId: req.user?._id })
+              : rol === "donante"
+                ? {
+                    $or: [
+                      { activa: true },
+                      ...(donatedCampaignIds.length
+                        ? [{ _id: { $in: donatedCampaignIds } }]
+                        : []),
+                    ],
+                  }
+              : { activa: true }
+          )
+            .select("_id activa estado fechaInicio fechaFin horaInicio horaFin puntosRecoleccion")
+            .lean();
+      const availableCampaignIds = campaigns
+        .filter((campaign) =>
+          rol === "admin"
+          || (
+            (isCampaignAvailableNow(campaign)
+              || (rol === "donante"
+                && donatedCampaignIds.some((id) => String(id) === String(campaign._id))))
+            && (rol !== "recolector"
+              || isCollectorAssignedToCampaign(campaign, req.user?._id))
+          )
+        )
+        .map((campaign) => campaign._id);
+      filtro = rol === "donante"
+        ? {
+            $or: [
+              { activa: true, campana: { $in: availableCampaignIds } },
+              ...(donatedCampaignIds.length
+                ? [{ campana: { $in: donatedCampaignIds } }]
+                : []),
+            ],
+          }
+        : { ...filtro, campana: { $in: availableCampaignIds } };
     }
     const categorias = await Categoria.find(filtro)
       .sort({ nombre: 1 })
       .lean();
     for (const categoria of categorias) {
-      categoria.subcategorias = (categoria.subcategorias || []).filter((item) => item.activa);
+      if (!historicalCampaignIds.has(String(categoria.campana))) {
+        categoria.subcategorias = (categoria.subcategorias || []).filter((item) => item.activa);
+      }
     }
     return res.status(200).json({ total: categorias.length, categorias });
   } catch (error) {
@@ -209,11 +275,31 @@ const listarCategoriasDeCampana = async (req, res) => {
   try {
     const campana = await obtenerCampana(req.params.campanaId);
     const rol = String(req.user?.rol || "").toLowerCase();
-    if (rol !== "admin" && !campana.activa) {
+    const donorHistoryAccess = rol === "donante"
+      && await donorHasCampaignDonations(req.user?._id, campana._id);
+    if (rol !== "admin" && !donorHistoryAccess && !campana.activa) {
       return res.status(404).json({ msg: "La campaña no existe o está inactiva" });
     }
+    if (rol !== "admin" && !donorHistoryAccess && !isCampaignAvailableNow(campana)) {
+      return res.status(404).json({
+        msg: "La campaña no está dentro de su fecha y horario de disponibilidad",
+      });
+    }
+    if (
+      rol === "recolector"
+      && (
+        ["borrador", "desactivada", "finalizada"].includes(
+          String(campana.estado || "").toLowerCase()
+        )
+        || !isCollectorAssignedToCampaign(campana, req.user?._id)
+      )
+    ) {
+      return res.status(403).json({
+        msg: "No tienes una asignación vigente en esta campaña",
+      });
+    }
     const assignedCategoryIds = campana.categoriasPermitidas || [];
-    const filtro = rol === "admin"
+    const filtro = rol === "admin" || donorHistoryAccess
       ? { campana: campana._id }
       : {
           activa: true,
@@ -268,7 +354,7 @@ const listarCategoriasDeCampana = async (req, res) => {
         category.totalDonaciones = totals.get(String(category._id)) || 0;
       }
     }
-    if (rol !== "admin") {
+    if (rol !== "admin" && !donorHistoryAccess) {
       for (const categoria of categorias) {
         categoria.subcategorias = (categoria.subcategorias || []).filter((item) => item.activa);
       }
@@ -284,16 +370,37 @@ const listarCategoriasDeCampana = async (req, res) => {
 const listarSubcategorias = async (req, res) => {
   try {
     const { id } = req.params;
+    const rol = String(req.user?.rol || "").toLowerCase();
     if (!mongoose.isValidObjectId(id)) {
       return res.status(400).json({ msg: "El identificador de la categoría no es válido" });
     }
-    const categoria = await Categoria.findOne({ _id: id, activa: true }).lean();
+    const categoria = await Categoria.findById(id).lean();
     if (!categoria) return res.status(404).json({ msg: "La categoría no existe o está inactiva" });
-    const campanaActiva = await Campana.exists({ _id: categoria.campana, activa: true });
-    if (!campanaActiva) return res.status(404).json({ msg: "La campaña de la categoría no existe o está inactiva" });
+    const campana = await Campana.findById(categoria.campana)
+      .select("activa estado fechaInicio fechaFin horaInicio horaFin puntosRecoleccion");
+    const donorHistoryAccess = rol === "donante"
+      && await donorHasCampaignDonations(req.user?._id, categoria.campana);
+    if (
+      !campana
+      || (rol !== "admin"
+        && !donorHistoryAccess
+        && (!categoria.activa || !campana.activa || !isCampaignAvailableNow(campana)))
+    ) {
+      return res.status(404).json({
+        msg: "La campaña de la categoría no está disponible",
+      });
+    }
+    if (
+      rol === "recolector"
+      && !isCollectorAssignedToCampaign(campana, req.user?._id)
+    ) {
+      return res.status(403).json({
+        msg: "No tienes una asignación vigente en esta campaña",
+      });
+    }
 
     const subcategorias = (categoria.subcategorias || [])
-      .filter((item) => item.activa)
+      .filter((item) => donorHistoryAccess || rol === "admin" || item.activa)
       .sort((left, right) => left.nombre.localeCompare(right.nombre));
     return res.status(200).json({ categoria: categoria.nombre, total: subcategorias.length, subcategorias });
   } catch (error) {
@@ -318,14 +425,40 @@ const obtenerCategoria = async (req, res) => {
     if (!mongoose.isValidObjectId(id)) {
       return res.status(400).json({ msg: "El identificador de la categoría no es válido" });
     }
-    const categoria = await Categoria.findById(id).populate("campana", "nombre activa");
+    const categoria = await Categoria.findById(id).populate(
+      "campana",
+      "nombre activa estado fechaInicio fechaFin horaInicio horaFin puntosRecoleccion"
+    );
     if (!categoria) return res.status(404).json({ msg: "La categoría no existe" });
     const rol = String(req.user?.rol || "").toLowerCase();
-    if (!categoria.activa && rol !== "admin") {
+    const donorHistoryAccess = rol === "donante"
+      && await donorHasCampaignDonations(req.user?._id, categoria.campana?._id);
+    if (!categoria.activa && rol !== "admin" && !donorHistoryAccess) {
       return res.status(404).json({ msg: "La categoría no existe o está inactiva" });
     }
-    if (rol !== "admin" && (!categoria.campana || !categoria.campana.activa)) {
+    if (
+      rol !== "admin"
+      && !donorHistoryAccess
+      && (!categoria.campana || !categoria.campana.activa)
+    ) {
       return res.status(404).json({ msg: "La campaña de la categoría no existe o está inactiva" });
+    }
+    if (
+      rol !== "admin"
+      && !donorHistoryAccess
+      && !isCampaignAvailableNow(categoria.campana)
+    ) {
+      return res.status(404).json({
+        msg: "La campaña de la categoría no está dentro de su fecha y horario de disponibilidad",
+      });
+    }
+    if (
+      rol === "recolector"
+      && !isCollectorAssignedToCampaign(categoria.campana, req.user?._id)
+    ) {
+      return res.status(403).json({
+        msg: "No tienes una asignación vigente en esta campaña",
+      });
     }
     return res.status(200).json({ categoria });
   } catch (error) {
@@ -376,7 +509,7 @@ const listarDonacionesDeCategoria = async (req, res) => {
     }
 
     const donaciones = await Donacion.find(filter)
-      .select("_id campana categoria categoriaRef subcategoria descripcion tipo estado imagenUrl metadata camposSnapshot createdAt updatedAt")
+      .select("_id campana categoria categoriaRef subcategoria descripcion tipo estado imagenUrl metadata camposSnapshot productosClasificados createdAt updatedAt")
       .sort({ createdAt: -1 })
       .lean();
     return res.status(200).json({

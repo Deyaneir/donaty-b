@@ -10,7 +10,7 @@ import {
 } from "../utils/donationImageFields.js";
 
 const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
-const ALLOWED_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const MAX_DESCRIPTION_LENGTH = 2000;
 const REQUEST_WINDOW_MS = 60 * 1000;
 const REQUEST_LIMIT = 10;
 const VISION_TIMEOUT_MS = 60 * 1000;
@@ -30,6 +30,33 @@ const logStage = (requestStartedAt, stage, startedAt, details = {}) => {
 
 const errorResponse = (res, status, code, message) =>
   res.status(status).json({ error: { code, message } });
+
+const detectImageMimeType = (buffer) => {
+  if (
+    buffer.length >= 3
+    && buffer[0] === 0xff
+    && buffer[1] === 0xd8
+    && buffer[2] === 0xff
+  ) {
+    return "image/jpeg";
+  }
+  if (
+    buffer.length >= 8
+    && buffer.subarray(0, 8).equals(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    )
+  ) {
+    return "image/png";
+  }
+  if (
+    buffer.length >= 12
+    && buffer.toString("ascii", 0, 4) === "RIFF"
+    && buffer.toString("ascii", 8, 12) === "WEBP"
+  ) {
+    return "image/webp";
+  }
+  return null;
+};
 
 const checkRateLimit = (userId) => {
   const now = Date.now();
@@ -182,15 +209,48 @@ const analyzeDonationImage = async (req, res) => {
     if (Array.isArray(image) || !image?.tempFilePath) {
       return errorResponse(res, 400, "IMAGE_REQUIRED", "Debes adjuntar una imagen en el campo imagen");
     }
-    if (!ALLOWED_IMAGE_TYPES.has(image.mimetype)) {
-      return errorResponse(res, 415, "UNSUPPORTED_IMAGE_TYPE", "La imagen debe ser JPG, PNG o WebP");
-    }
-    if (image.truncated || image.size > MAX_IMAGE_SIZE) {
+    if (image.truncated) {
       return errorResponse(res, 413, "IMAGE_TOO_LARGE", "La imagen no puede superar 5 MB");
     }
+    const base64StartedAt = performance.now();
+    console.info("[donacion-imagen] antes-lectura-imagen", {
+      requestId,
+      tempFileAvailable: Boolean(tempFilePath),
+    });
+    let imageBuffer;
+    try {
+      imageBuffer = await readFile(tempFilePath);
+    } catch (error) {
+      console.error("[donacion-imagen] error-lectura-imagen", {
+        requestId,
+        code: error?.code || null,
+        message: error?.message || "Error sin mensaje",
+      });
+      throw error;
+    }
+    if (imageBuffer.length > MAX_IMAGE_SIZE) {
+      return errorResponse(res, 413, "IMAGE_TOO_LARGE", "La imagen no puede superar 5 MB");
+    }
+    const imageMimeType = detectImageMimeType(imageBuffer);
+    if (!imageMimeType) {
+      return errorResponse(res, 415, "UNSUPPORTED_IMAGE_TYPE", "El archivo debe ser una imagen JPG, PNG o WebP válida");
+    }
+    if (image.mimetype !== imageMimeType) {
+      console.warn("[donacion-imagen] mime-type-corregido", {
+        requestId,
+        uploadedMimeType: image.mimetype || null,
+        detectedMimeType: imageMimeType,
+      });
+    }
     logStage(requestStartedAt, "validacion-imagen", validationStartedAt, {
-      mimeTypeAccepted: ALLOWED_IMAGE_TYPES.has(image.mimetype),
-      sizeBytes: image.size,
+      uploadedMimeType: image.mimetype || null,
+      detectedMimeType: imageMimeType,
+      sizeBytes: imageBuffer.length,
+    });
+    logStage(requestStartedAt, "lectura-base64-imagen", base64StartedAt, {
+      requestId,
+      imageBytes: imageBuffer.length,
+      base64Bytes: Math.ceil(imageBuffer.length / 3) * 4,
     });
 
     const campaignId = String(req.body?.campanaId ?? "").trim();
@@ -274,33 +334,12 @@ const analyzeDonationImage = async (req, res) => {
       requestFormat: "Groq OpenAI-compatible chat completions with data URL image",
     });
 
-    const base64StartedAt = performance.now();
-    console.info("[donacion-imagen] antes-lectura-imagen", {
-      requestId,
-      tempFileAvailable: Boolean(tempFilePath),
-    });
-    let imageBuffer;
-    try {
-      imageBuffer = await readFile(tempFilePath);
-    } catch (error) {
-      console.error("[donacion-imagen] error-lectura-imagen", {
-        requestId,
-        code: error?.code || null,
-        message: error?.message || "Error sin mensaje",
-      });
-      throw error;
-    }
     const imageBase64 = imageBuffer.toString("base64");
-    const dataUrl = `data:${image.mimetype};base64,${imageBase64}`;
-    logStage(requestStartedAt, "lectura-base64-imagen", base64StartedAt, {
-      requestId,
-      imageBytes: imageBuffer.length,
-      base64Bytes: imageBase64.length,
-    });
+    const dataUrl = `data:${imageMimeType};base64,${imageBase64}`;
     const prompt = [
       "Analiza visualmente la imagen para sugerir el nombre del bien, su descripción y los campos de texto o numéricos indicados.",
       "Devuelve solo un objeto JSON con nombreBien, descripcion, campos y confianza.",
-      "nombreBien debe ser un nombre breve del artículo visible. descripcion debe tener hasta 500 caracteres y contener únicamente hechos observables.",
+      `nombreBien debe ser un nombre breve del artículo visible. descripcion debe incluir todos los detalles visuales útiles (tipo, color, material, estado y rasgos distintivos), sin limitarse a una frase corta, con un máximo de ${MAX_DESCRIPTION_LENGTH} caracteres y únicamente hechos observables.`,
       "Si un dato no puede identificarse con evidencia suficiente, usa null. Nunca uses 'desconocido', 'no identificado', texto inventado ni afirmaciones no visibles.",
       "En campos, usa únicamente las claves exactas de la lista permitida y completa solo valores claramente observables en la fotografía. Para datos que no puedan deducirse con certeza, omite la clave o usa null.",
       "No selecciones opciones, no completes campos de selección, fechas, cantidades generales, categorías, subcategorías ni datos que no sean visibles.",
@@ -400,9 +439,9 @@ const analyzeDonationImage = async (req, res) => {
       ? rawName.trim().slice(0, 120)
       : null;
     const validDescription = typeof analysis.descripcion === "string" && analysis.descripcion.trim()
-      ? analysis.descripcion.trim().slice(0, 500)
+      ? analysis.descripcion.trim().slice(0, MAX_DESCRIPTION_LENGTH)
       : typeof analysis.description === "string" && analysis.description.trim()
-        ? analysis.description.trim().slice(0, 500)
+        ? analysis.description.trim().slice(0, MAX_DESCRIPTION_LENGTH)
         : null;
     const rawFields = analysis.campos ?? analysis.fields;
     const fieldSuggestions = normalizeImageFieldSuggestions(rawFields, writableFields);

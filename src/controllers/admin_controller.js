@@ -2,6 +2,8 @@ import mongoose from "mongoose";
 import Donante from "../models/Donante.js";
 import Admin from "../models/Admin.js";
 import Recolector from "../models/Recolector.js";
+import Campana from "../models/Campana.js";
+import { mapCollectorPointAssignments } from "../utils/collectorHistory.js";
 import {
   crearTokenJWT,
   crearRefreshToken,
@@ -368,9 +370,18 @@ const listarRecolectores = async (req, res) => {
       filtro.status = statusBool;
     }
 
-    if (q) {
-      const regex = new RegExp(String(q), "i");
-      filtro.$or = [{ nombre: regex }, { apellido: regex }, { email: regex }];
+    const searchTerms = String(q ?? "").trim().split(/\s+/).filter(Boolean);
+    if (searchTerms.some((term) => term.length > 100)) {
+      return res.status(400).json({ msg: "La búsqueda no puede superar 100 caracteres" });
+    }
+    if (searchTerms.length) {
+      filtro.$and = searchTerms.map((term) => {
+        const escapedQuery = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const regex = new RegExp(escapedQuery, "i");
+        return {
+          $or: [{ nombre: regex }, { apellido: regex }, { email: regex }],
+        };
+      });
     }
 
     const pageNum = Math.max(parseInt(page, 10) || 1, 1);
@@ -379,17 +390,33 @@ const listarRecolectores = async (req, res) => {
 
     const [items, total] = await Promise.all([
       Recolector.find(filtro)
+        .select("_id nombre apellido email telefono status aprobado confirmEmail createdAt")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limitNum),
       Recolector.countDocuments(filtro),
     ]);
+    const collectorIds = items.map((item) => item._id);
+    const assignedCampaigns = collectorIds.length
+      ? await Campana.find({
+          "puntosRecoleccion.recolectores": { $in: collectorIds },
+        })
+          .select("_id nombre puntosRecoleccion")
+          .lean()
+      : [];
+    const assignmentsByCollector = mapCollectorPointAssignments(
+      collectorIds,
+      assignedCampaigns
+    );
 
     return res.status(200).json({
       total,
       page: pageNum,
       limit: limitNum,
-      items,
+      items: items.map((item) => ({
+        ...item.toJSON(),
+        asignacionesPuntos: assignmentsByCollector.get(String(item._id)) || [],
+      })),
     });
   } catch (error) {
     console.error(error);

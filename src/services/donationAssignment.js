@@ -2,7 +2,10 @@ import { randomInt as secureRandomInt } from "node:crypto";
 import mongoose from "mongoose";
 import Campana from "../models/Campana.js";
 import Donacion from "../models/Donacion.js";
+import EntregaCampana from "../models/EntregaCampana.js";
 import Recolector from "../models/Recolector.js";
+import { isCampaignFinished } from "./campaignDelivery.js";
+import { isCampaignAvailableNow } from "../utils/campaignSchedule.js";
 
 const TERMINAL_DONATION_STATES = ["cancelada", "entregada", "devuelta"];
 
@@ -12,6 +15,15 @@ const assignmentError = (message, statusCode = 409) =>
 const isPointAvailable = (point) =>
   point?.activo !== false
   && String(point?.estado ?? "").toLowerCase() !== "inactivo";
+
+const getAssignedCollectorIds = (point) => [...new Set([
+  ...(point?.recolectores || []).map((collector) =>
+    String(collector?._id ?? collector)
+  ),
+  ...(point?.responsableRecolector
+    ? [String(point.responsableRecolector?._id ?? point.responsableRecolector)]
+    : []),
+].filter(Boolean))];
 
 const chooseBalancedAssignment = ({
   points,
@@ -24,7 +36,7 @@ const chooseBalancedAssignment = ({
   const candidates = points
     .filter(isPointAvailable)
     .flatMap((point) =>
-      [...new Set((point.recolectores || []).map(String))]
+      getAssignedCollectorIds(point)
         .filter((collectorId) => availableCollectors.has(collectorId))
         .map((collectorId) => ({
           point,
@@ -80,6 +92,9 @@ const createDonationWithAssignment = async ({
   campaignModel = Campana,
   donationModel = Donacion,
   collectorModel = Recolector,
+  deliveryModel = EntregaCampana,
+  pointId = null,
+  requestingCollectorId = null,
   sessionFactory = () => mongoose.startSession(),
   randomInt = secureRandomInt,
 }) => {
@@ -94,19 +109,49 @@ const createDonationWithAssignment = async ({
       if (!campaign) {
         throw assignmentError("La campaña no existe o no está activa", 409);
       }
+      if (isCampaignFinished(campaign)) {
+        throw assignmentError("La campaña ya finalizó y no acepta nuevas donaciones", 409);
+      }
+      if (!isCampaignAvailableNow(campaign)) {
+        throw assignmentError(
+          "La campaña no está dentro de su fecha y horario de disponibilidad",
+          409
+        );
+      }
 
-      const activePoints = (campaign.puntosRecoleccion || []).filter(isPointAvailable);
+      if (await deliveryModel.exists({ campana: campaign._id }).session(session)) {
+        throw assignmentError("La campaña ya tiene una entrega general registrada");
+      }
+
+      const activePoints = (campaign.puntosRecoleccion || [])
+        .filter(isPointAvailable)
+        .filter((point) => !pointId || String(point._id) === String(pointId));
       if (!activePoints.length) {
         throw assignmentError(
-          "La campaña no tiene puntos de recolección activos y disponibles"
+          pointId
+            ? "El punto indicado no existe o no está disponible en esta campaña"
+            : "La campaña no tiene puntos de recolección activos y disponibles"
+        );
+      }
+      if (
+        requestingCollectorId
+        && !activePoints.some((point) =>
+          getAssignedCollectorIds(point).includes(String(requestingCollectorId))
+        )
+      ) {
+        throw assignmentError(
+          "El recolector que registra debe estar asignado al punto seleccionado",
+          403
         );
       }
       const collectorIds = [...new Set(
-        activePoints.flatMap((point) => (point.recolectores || []).map(String))
+        activePoints.flatMap(getAssignedCollectorIds)
       )];
       const collectors = collectorIds.length
         ? await collectorModel.find({
-          _id: { $in: collectorIds },
+          _id: requestingCollectorId
+            ? requestingCollectorId
+            : { $in: collectorIds },
           status: { $ne: false },
           aprobado: { $ne: false },
           confirmEmail: true,
@@ -114,7 +159,9 @@ const createDonationWithAssignment = async ({
         : [];
       if (!collectors.length) {
         throw assignmentError(
-          "La campaña no tiene recolectores activos, aprobados y verificados disponibles"
+          requestingCollectorId
+            ? "El recolector que registra no está activo, aprobado y verificado para recibir la asignación"
+            : "La campaña no tiene recolectores activos, aprobados y verificados disponibles"
         );
       }
 
@@ -172,6 +219,7 @@ const createDonationWithAssignment = async ({
           {
             recolectorNuevo: selected.collector._id,
             puntoRecoleccionNuevo: selected.point._id,
+            estado: payload.estado ?? null,
             fecha: assignedAt,
             motivo: "Asignación automática al registrar la donación",
           },
@@ -238,4 +286,5 @@ export {
   TERMINAL_DONATION_STATES,
   chooseBalancedAssignment,
   createDonationWithAssignment,
+  getAssignedCollectorIds,
 };

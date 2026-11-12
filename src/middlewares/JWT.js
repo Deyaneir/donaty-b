@@ -64,4 +64,10 @@ const authMiddleware = async (req, res, next) => {
   }
 };
 
+export const authOpcional = (req, res, next) => {
+  const header = req.headers.authorization || "";
+  if (!header.startsWith("Bearer ")) return next();
+  return authMiddleware(req, res, next);
+};
+
 export default authMiddleware;

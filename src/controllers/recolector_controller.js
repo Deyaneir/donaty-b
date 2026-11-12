@@ -16,19 +16,24 @@ import {
   verificarRefreshToken,
 } from "../middlewares/JWT.js";
 import { isBlank, requireFields } from "../utils/validation.js";
-import { serializeCollectorAssignments } from "../utils/pickupPoints.js";
+import {
+  buildPointCollectorAssignmentFilter,
+  serializeCollectorAssignments,
+} from "../utils/pickupPoints.js";
 import { isInsideEpnCampus } from "../utils/epnCampusGeofence.js";
 import {
   classifyCollectorGeofenceState,
   getCollectorGeofenceTransition,
   hasValidCollectorCoordinates,
-  MAX_GPS_ACCURACY_METERS,
-  MAX_GPS_AGE_MS,
-  MAX_GPS_FUTURE_SKEW_MS,
 } from "../utils/collectorLocation.js";
 import CollectorLocationEvent from "../models/CollectorLocationEvent.js";
+import CollectorLocation from "../models/CollectorLocation.js";
 import CollectorLocationSimulation from "../models/CollectorLocationSimulation.js";
-import { notifyUsers } from "../services/firebase_notifications.js";
+import { publishCollectorLocationEvent } from "../services/domainEvents.js";
+import {
+  selectLatestCollectorLocation,
+  serializeCollectorLocation,
+} from "../utils/collectorLocationSource.js";
 import {
   createCollectorLocationScenario,
   isCollectorLocationSimulatorEnabled,
@@ -453,12 +458,9 @@ const actualizarPasswordRecolector = async (req, res) => {
 };
 
 const actualizarUbicacionRecolector = async (req, res) => {
-  let session;
   try {
     const user = req.user || req.donanteHeader;
     const {
-      campanaId,
-      puntoRecoleccionId,
       latitud,
       longitud,
       precisionMetros,
@@ -469,232 +471,153 @@ const actualizarUbicacionRecolector = async (req, res) => {
     if (!user?._id) {
       return res.status(401).json({ msg: "No autenticado" });
     }
-    if (!mongoose.isValidObjectId(campanaId) || !mongoose.isValidObjectId(puntoRecoleccionId)) {
-      return res.status(400).json({ msg: "Debes indicar una campaña y un punto válidos" });
-    }
-    const latitude = Number(latitud);
-    const longitude = Number(longitud);
-    const accuracy = Number(precisionMetros);
+    const parseCoordinate = (value) => {
+      if (
+        (typeof value !== "number" && typeof value !== "string")
+        || (typeof value === "string" && value.trim() === "")
+      ) {
+        return NaN;
+      }
+      return Number(value);
+    };
+    const latitude = parseCoordinate(latitud);
+    const longitude = parseCoordinate(longitud);
     if (
       !Number.isFinite(latitude) || latitude < -90 || latitude > 90
       || !Number.isFinite(longitude) || longitude < -180 || longitude > 180
     ) {
       return res.status(400).json({ msg: "Las coordenadas GPS no son válidas" });
     }
-    if (
-      !Number.isFinite(accuracy)
-      || accuracy < 0
-      || accuracy > MAX_GPS_ACCURACY_METERS
-    ) {
-      return res.status(422).json({
-        code: "LOCATION_ACCURACY_INSUFFICIENT",
-        msg: "La ubicación no tiene suficiente precisión. Activa el GPS y vuelve a intentar.",
-      });
-    }
-    const capturedAt = new Date(capturadoEn);
-    const captureAge = Date.now() - capturedAt.getTime();
-    if (
-      !capturadoEn
-      || !Number.isFinite(captureAge)
-      || captureAge > MAX_GPS_AGE_MS
-      || captureAge < -MAX_GPS_FUTURE_SKEW_MS
-    ) {
-      return res.status(422).json({
-        code: "LOCATION_CAPTURE_STALE",
-        msg: "La lectura GPS está desactualizada. Obtén y confirma una nueva ubicación.",
-      });
-    }
-
-    let response;
-    let transitionEvent;
-    session = await mongoose.startSession();
-    await session.withTransaction(async () => {
-      transitionEvent = null;
-      const campaign = await Campana.findOne({
-        _id: campanaId,
-        activa: true,
-        puntosRecoleccion: {
-          $elemMatch: {
-            _id: puntoRecoleccionId,
-            activo: { $ne: false },
-            estado: { $ne: "inactivo" },
-            recolectores: user._id,
-          },
-        },
-      })
-        .select("nombre puntosRecoleccion")
-        .session(session);
-      if (!campaign) {
-        const error = new Error("No tienes una asignación vigente para ese punto");
-        error.statusCode = 403;
-        throw error;
-      }
-
-      const collector = await Recolector.findById(user._id)
-        .select("nombre apellido status ubicacionGps")
-        .session(session);
-      if (!collector || collector.status === false) {
-        const error = new Error("La cuenta de recolector no está activa");
-        error.statusCode = 403;
-        throw error;
-      }
-
-      if (automaticTracking && isCollectorLocationSimulatorEnabled()) {
-        const activeSimulation = await CollectorLocationSimulation.findOne({
-          collector: user._id,
-          expiresAt: { $gt: new Date() },
-        }).session(session);
-        if (activeSimulation) {
-          const error = new Error(
-            "El seguimiento GPS real se pausó porque hay una simulación activa"
-          );
-          error.statusCode = 409;
-          error.code = "LOCATION_SIMULATION_ACTIVE";
-          throw error;
-        }
-      }
-
-      const previousGps = collector.ubicacionGps;
-      const previousState = previousGps?.estadoGeografico
-        ?? classifyCollectorGeofenceState({
-          collectorActive: collector.status !== false,
-          capturedAt: previousGps?.capturadoEn ?? previousGps?.actualizadoEn,
-          latitude: previousGps?.latitud,
-          longitude: previousGps?.longitud,
-          accuracyMeters: previousGps?.precisionMetros,
-          insideGeofence:
-            previousGps != null
-            && isInsideEpnCampus(previousGps.latitud, previousGps.longitud),
+    let accuracy = null;
+    if (precisionMetros !== undefined && precisionMetros !== null) {
+      accuracy = parseCoordinate(precisionMetros);
+      if (!Number.isFinite(accuracy) || accuracy < 0) {
+        return res.status(400).json({
+          msg: "La precisión GPS debe ser un número mayor o igual a cero",
         });
-      const insideGeofence = isInsideEpnCampus(latitude, longitude);
-      const state = classifyCollectorGeofenceState({
-        collectorActive: true,
-        capturedAt,
-        latitude,
-        longitude,
-        accuracyMeters: accuracy,
-        insideGeofence,
-      });
-      if (state !== "dentro" && state !== "fuera") {
-        const error = new Error("La lectura GPS no puede registrarse como actual");
-        error.statusCode = 422;
-        error.code = "LOCATION_CAPTURE_INVALID";
-        throw error;
       }
-
-      const actualizadoEn = new Date();
-      await Recolector.updateOne(
-        { _id: user._id },
-        {
-          $set: {
-            ubicacionGps: {
-              campana: campaign._id,
-              puntoRecoleccion: puntoRecoleccionId,
-              latitud: latitude,
-              longitud: longitude,
-              precisionMetros: accuracy,
-              capturadoEn: capturedAt,
-              estadoGeografico: state,
-              actualizadoEn,
-            },
-          },
-        },
-        { runValidators: true, session }
-      );
-      if (!automaticTracking) {
-        await CollectorLocationSimulation.deleteOne(
-          { collector: user._id },
-          { session }
-        );
+    }
+    let capturedAt = null;
+    if (capturadoEn !== undefined && capturadoEn !== null && capturadoEn !== "") {
+      if (
+        (typeof capturadoEn !== "string" && typeof capturadoEn !== "number")
+        || (typeof capturadoEn === "string" && capturadoEn.trim() === "")
+      ) {
+        return res.status(400).json({
+          msg: "La fecha de captura GPS no es válida",
+        });
       }
-
-      const transition = getCollectorGeofenceTransition(previousState, state);
-      if (transition) {
-        const point = campaign.puntosRecoleccion.id(puntoRecoleccionId);
-        const previousCapture = previousGps?.capturadoEn
-          ?? previousGps?.actualizadoEn;
-        const transitionKey = previousCapture
-          ? new Date(previousCapture).getTime()
-          : "initial";
-        const eventKey =
-          `collector-geofence:${user._id}:${campaign._id}:${puntoRecoleccionId}:` +
-          `${transitionKey}:${state}`;
-        const [event] = await CollectorLocationEvent.create(
-          [{
-            eventKey,
-            collector: user._id,
-            campaign: campaign._id,
-            point: puntoRecoleccionId,
-            collectorName: `${collector.nombre} ${collector.apellido}`.trim(),
-            campaignName: campaign.nombre,
-            pointName: point?.nombre ?? "",
-            state,
-            latitude,
-            longitude,
-            accuracyMeters: accuracy,
-            capturedAt,
-          }],
-          { session }
-        );
-        transitionEvent = event.toObject();
+      capturedAt = new Date(capturadoEn);
+      if (!Number.isFinite(capturedAt.getTime())) {
+        return res.status(400).json({
+          msg: "La fecha de captura GPS no es válida",
+        });
       }
+    }
 
-      response = {
-        ubicacion: {
-          campanaId: String(campaign._id),
-          puntoRecoleccionId: String(puntoRecoleccionId),
-          latitud: latitude,
-          longitud: longitude,
-          precisionMetros: accuracy,
-          capturadoEn: capturedAt,
-          actualizadoEn,
-          estadoGeografico: state,
-          permiteOperar: state === "dentro",
-        },
-      };
+    const collector = await Recolector.findById(user._id)
+      .select("status")
+      .lean();
+    if (!collector || collector.status === false) {
+      return res.status(403).json({ msg: "La cuenta de recolector no está activa" });
+    }
+
+    if (automaticTracking && isCollectorLocationSimulatorEnabled()) {
+      const activeSimulation = await CollectorLocationSimulation.findOne({
+        collector: user._id,
+        expiresAt: { $gt: new Date() },
+      }).lean();
+      if (activeSimulation) {
+        return res.status(409).json({
+          code: "LOCATION_SIMULATION_ACTIVE",
+          msg: "El seguimiento GPS real se pausó porque hay una simulación activa",
+        });
+      }
+    }
+
+    const recibidoEn = new Date();
+    const insideGeofence = isInsideEpnCampus(latitude, longitude);
+    const state = classifyCollectorGeofenceState({
+      collectorActive: true,
+      capturedAt,
+      latitude,
+      longitude,
+      accuracyMeters: accuracy,
+      insideGeofence,
     });
-
-    if (transitionEvent) {
-      try {
-        const admins = await Admin.find({ status: { $ne: false } })
-          .select("_id")
-          .lean();
-        const returned = transitionEvent.state === "dentro";
-        void notifyUsers({
-          eventKey: transitionEvent.eventKey,
-          recipients: admins.map((admin) => ({ userId: admin._id, role: "admin" })),
-          title: returned
-            ? "Recolector dentro del área autorizada"
-            : "Alerta: recolector fuera del área",
-          body:
-            `${transitionEvent.collectorName} · ${transitionEvent.campaignName} · ` +
-            `${transitionEvent.pointName} · ` +
-            `${transitionEvent.capturedAt.toISOString()} · ` +
-            `${transitionEvent.latitude}, ${transitionEvent.longitude}`,
-          data: {
-            type: "collector_geofence",
-            eventId: transitionEvent._id,
-            collectorId: transitionEvent.collector,
-            collectorName: transitionEvent.collectorName,
-            campaignId: transitionEvent.campaign,
-            campaignName: transitionEvent.campaignName,
-            pointId: transitionEvent.point,
-            pointName: transitionEvent.pointName,
-            state: transitionEvent.state,
-            latitude: transitionEvent.latitude,
-            longitude: transitionEvent.longitude,
-            accuracyMeters: transitionEvent.accuracyMeters,
-            capturedAt: transitionEvent.capturedAt,
+    const estadoGeografico = insideGeofence ? "dentro" : "fuera";
+    const updateResult = await Recolector.updateOne(
+      { _id: user._id, status: { $ne: false } },
+      {
+        $set: {
+          ubicacionGps: {
+            campana: null,
+            puntoRecoleccion: null,
+            latitud: latitude,
+            longitud: longitude,
+            precisionMetros: accuracy,
+            capturadoEn: capturedAt,
+            estadoGeografico,
+            actualizadoEn: recibidoEn,
           },
-        });
+        },
+      },
+      { runValidators: true }
+    );
+    if (!updateResult?.acknowledged) {
+      throw new Error("MongoDB no confirmó el registro de la ubicación");
+    }
+    if (updateResult.matchedCount === 0) {
+      return res.status(403).json({ msg: "La cuenta de recolector no está activa" });
+    }
+    if (updateResult.matchedCount !== 1) {
+      throw new Error("MongoDB no confirmó el recolector actualizado");
+    }
+
+    const locationRecord = await CollectorLocation.create({
+      collector: user._id,
+      latitude,
+      longitude,
+      accuracyMeters: accuracy,
+      capturedAt,
+      receivedAt: recibidoEn,
+    });
+    if (!locationRecord?._id) {
+      throw new Error("MongoDB no confirmó el registro del historial GPS");
+    }
+
+    if (!automaticTracking) {
+      try {
+        await CollectorLocationSimulation.deleteOne({ collector: user._id });
       } catch (error) {
         console.error(
-          "El evento geográfico quedó registrado, pero no se pudo preparar el push:",
+          "La ubicación se guardó, pero no se pudo limpiar la simulación GPS:",
           error.message || error
         );
       }
     }
-    return res.status(200).json(response);
+
+    publishCollectorLocationEvent(req, user._id, {
+      latitud: latitude,
+      longitud: longitude,
+      precisionMetros: accuracy,
+      capturadoEn: capturedAt,
+      actualizadoEn: recibidoEn,
+      estadoGeografico,
+    });
+    return res.status(200).json({
+      ubicacion: {
+        campanaId: null,
+        puntoRecoleccionId: null,
+        latitud: latitude,
+        longitud: longitude,
+        precisionMetros: accuracy,
+        capturadoEn: capturedAt,
+        actualizadoEn: recibidoEn,
+        estadoGeografico: state,
+        permiteOperar: state === "dentro",
+      },
+    });
   } catch (error) {
     console.error("Error guardando ubicación GPS del recolector:", error.message || error);
     return res.status(error.statusCode || 500).json({
@@ -703,8 +626,6 @@ const actualizarUbicacionRecolector = async (req, res) => {
         ? error.message
         : "Error al actualizar la ubicación GPS",
     });
-  } finally {
-    if (session) await session.endSession();
   }
 };
 
@@ -722,10 +643,13 @@ const consultarUbicacionRecolector = async (req, res) => {
           expiresAt: { $gt: new Date() },
         }).lean()
       : null;
-    const gps = simulation ?? collector?.ubicacionGps;
+    const { location: gps, simulated } = selectLatestCollectorLocation(
+      collector?.ubicacionGps,
+      simulation
+    );
     const state = classifyCollectorGeofenceState({
       collectorActive: collector?.status !== false,
-      capturedAt: gps?.capturadoEn ?? gps?.capturedAt ?? gps?.actualizadoEn,
+      capturedAt: gps?.capturadoEn ?? gps?.capturedAt,
       latitude: gps?.latitud ?? gps?.latitude,
       longitude: gps?.longitud ?? gps?.longitude,
       accuracyMeters: gps?.precisionMetros ?? gps?.accuracyMeters,
@@ -740,32 +664,83 @@ const consultarUbicacionRecolector = async (req, res) => {
     return res.status(200).json({
       estadoGeografico: state,
       permiteOperar: state === "dentro",
-      simulada: Boolean(simulation),
-      ...(simulation ? { escenario: simulation.scenario } : {}),
+      simulada: simulated,
+      ...(simulated ? { escenario: gps.scenario } : {}),
       ubicacion: hasValidCollectorCoordinates(
         gps?.latitud ?? gps?.latitude,
         gps?.longitud ?? gps?.longitude
       ) && state !== "inactivo"
-        ? {
-            campanaId: (gps.campana ?? gps.campaign)
-              ? String(gps.campana ?? gps.campaign)
-              : null,
-            puntoRecoleccionId: gps.puntoRecoleccion
-              ? String(gps.puntoRecoleccion)
-              : gps.point
-              ? String(gps.point)
-              : null,
-            latitud: gps.latitud ?? gps.latitude,
-            longitud: gps.longitud ?? gps.longitude,
-            precisionMetros: gps.precisionMetros ?? gps.accuracyMeters,
-            capturadoEn: gps.capturadoEn ?? gps.capturedAt ?? gps.actualizadoEn,
-            actualizadoEn: gps.actualizadoEn ?? gps.updatedAt,
-          }
+        ? serializeCollectorLocation(gps)
         : null,
     });
   } catch (error) {
     console.error("Error consultando ubicación GPS del recolector:", error.message || error);
     return res.status(500).json({ msg: "No se pudo consultar la ubicación GPS" });
+  }
+};
+
+const consultarUltimaUbicacionRecolector = async (req, res) => {
+  try {
+    const user = req.user || req.donanteHeader;
+    const { collectorId } = req.params;
+    if (!user?._id) return res.status(401).json({ msg: "No autenticado" });
+    if (!mongoose.isValidObjectId(collectorId)) {
+      return res.status(400).json({ msg: "El identificador del recolector no es válido" });
+    }
+    if (
+      String(user.rol || "").toLowerCase() !== "admin"
+      && String(user._id) !== String(collectorId)
+    ) {
+      return res.status(403).json({
+        msg: "Solo un administrador o el propio recolector puede consultar esta ubicación",
+      });
+    }
+
+    const collector = await Recolector.findById(collectorId)
+      .select("status ubicacionGps")
+      .lean();
+    if (!collector) return res.status(404).json({ msg: "El recolector no existe" });
+    const locationRecord = await CollectorLocation.findOne({
+      collector: collectorId,
+    }).sort({ receivedAt: -1 }).lean();
+    const location = locationRecord
+      ? {
+          latitude: locationRecord.latitude,
+          longitude: locationRecord.longitude,
+          accuracyMeters: locationRecord.accuracyMeters,
+          capturedAt: locationRecord.capturedAt,
+          updatedAt: locationRecord.receivedAt,
+        }
+      : collector.ubicacionGps;
+    const state = classifyCollectorGeofenceState({
+      collectorActive: collector.status !== false,
+      capturedAt: location?.capturedAt ?? location?.capturadoEn,
+      latitude: location?.latitude ?? location?.latitud,
+      longitude: location?.longitude ?? location?.longitud,
+      accuracyMeters: location?.accuracyMeters ?? location?.precisionMetros,
+      insideGeofence:
+        location != null
+        && (location.latitude != null
+          ? isInsideEpnCampus(location.latitude, location.longitude)
+          : location.latitud != null
+          && isInsideEpnCampus(location.latitud, location.longitud)),
+    });
+    const hasCoordinates = hasValidCollectorCoordinates(
+      location?.latitude ?? location?.latitud,
+      location?.longitude ?? location?.longitud
+    );
+    return res.status(200).json({
+      recolectorId: String(collector._id),
+      estadoGeografico: state,
+      ubicacion: hasCoordinates
+        ? serializeCollectorLocation(location)
+        : null,
+    });
+  } catch (error) {
+    console.error("Error consultando la última ubicación del recolector:", error.message || error);
+    return res.status(500).json({
+      msg: "No se pudo consultar la última ubicación del recolector",
+    });
   }
 };
 
@@ -842,7 +817,7 @@ const actualizarSimulacionUbicacionRecolector = async (req, res) => {
             _id: puntoRecoleccionId,
             activo: { $ne: false },
             estado: { $ne: "inactivo" },
-            recolectores: user._id,
+            ...buildPointCollectorAssignmentFilter(user._id),
           },
         },
       })
@@ -1009,11 +984,11 @@ const listarAsignacionesVigentesRecolector = async (req, res) => {
         $elemMatch: {
           activo: { $ne: false },
           estado: { $ne: "inactivo" },
-          recolectores: user._id,
+          ...buildPointCollectorAssignmentFilter(user._id),
         },
       },
     })
-      .select("nombre puntosRecoleccion")
+      .select("nombre puntosRecoleccion historialAsignacionesRecolectores")
       .lean();
 
     const items = serializeCollectorAssignments(campaigns, user._id);
@@ -1041,6 +1016,7 @@ export {
   actualizarPasswordRecolector,
   actualizarUbicacionRecolector,
   consultarUbicacionRecolector,
+  consultarUltimaUbicacionRecolector,
   consultarSimuladorUbicacionRecolector,
   actualizarSimulacionUbicacionRecolector,
   limpiarSimulacionUbicacionRecolector,

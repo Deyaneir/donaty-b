@@ -74,6 +74,10 @@ const sendBatch = async (messaging, tokens, notification, data) => {
       { $set: { active: false } }
     );
   }
+  return {
+    successCount: response.successCount ?? 0,
+    failureCount: response.failureCount ?? 0,
+  };
 };
 
 const notifyUsers = async ({
@@ -83,12 +87,12 @@ const notifyUsers = async ({
   body,
   data = {},
 }) => {
-  if (!eventKey || !firebaseApp) return;
+  if (!eventKey) return { status: "invalid_event" };
+  if (!firebaseApp) return { status: "disabled" };
 
   try {
-    if (!(await claimEvent(eventKey))) return;
     const normalizedRecipients = normalizeRecipients(recipients);
-    if (!normalizedRecipients.length) return;
+    if (!normalizedRecipients.length) return { status: "no_recipients" };
 
     const deviceFilter = {
       active: true,
@@ -96,22 +100,33 @@ const notifyUsers = async ({
     };
     const devices = await FcmDevice.find(deviceFilter).select("token").lean();
     const tokens = devices.map((device) => device.token).filter(Boolean);
-    if (!tokens.length) return;
+    if (!tokens.length) return { status: "no_devices" };
+    if (!(await claimEvent(eventKey))) return { status: "duplicate" };
 
     const messaging = getMessaging(firebaseApp);
     const safeData = Object.fromEntries(
       Object.entries(data).map(([key, value]) => [key, String(value ?? "")])
     );
+    let successCount = 0;
+    let failureCount = 0;
     for (let index = 0; index < tokens.length; index += 500) {
-      await sendBatch(
+      const result = await sendBatch(
         messaging,
         tokens.slice(index, index + 500),
         { title, body },
         safeData
       );
+      successCount += result.successCount;
+      failureCount += result.failureCount;
     }
+    return {
+      status: failureCount === 0 ? "sent" : successCount === 0 ? "failed" : "partial_failure",
+      successCount,
+      failureCount,
+    };
   } catch (error) {
     console.error("Error enviando notificación push:", error.message || error);
+    return { status: "failed" };
   }
 };
 

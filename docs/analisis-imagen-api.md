@@ -10,7 +10,7 @@ Requiere `Authorization: Bearer <token>` y `Content-Type: multipart/form-data`. 
 
 | Campo | Tipo | Requerido | Descripción |
 | --- | --- | --- | --- |
-| `imagen` | archivo | Sí | Una imagen JPG/JPEG, PNG o WebP, hasta 5 MB. |
+| `imagen` | archivo | Sí | Una imagen JPG/JPEG, PNG o WebP válida, hasta 5 MB. El backend detecta el formato desde el contenido, aunque el cliente envíe un MIME genérico. |
 | `campanaId` | texto | Sí | ID de una campaña existente y activa. |
 | `categoriaId` | texto | No | ID de una categoría activa permitida por la campaña. |
 
@@ -100,6 +100,7 @@ GROQ_API_URL=https://api.groq.com/openai/v1/chat/completions
 ```
 
 El proveedor debe aceptar Chat Completions con entrada de imagen. El backend usa Groq por defecto y envía la clave en `Authorization: Bearer`. La aplicación móvil nunca debe recibir `GROQ_API_KEY`.
+La descripción sugerida puede contener hasta 2000 caracteres; el backend conserva el texto completo hasta ese límite.
 
 ## Ejemplo Flutter
 
