@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { findPublicAccountEmailConflict } from "../src/utils/accountEmail.js";
 import { migratePublicAccountEmailIndexes } from "../src/services/accountEmailIndexMigration.js";
 
 const fakeModel = (collectionName, indexes, duplicates = []) => {
@@ -58,6 +59,24 @@ test("email-role migration creates the compound index before dropping the legacy
     { unique: true, name: "email_1_rol_1" },
   ]);
   assert.deepEqual(calls[2], ["dropIndex", "email_1"]);
+});
+
+test("email-role validation blocks the same role but allows the same email across donor and collector", async () => {
+  const models = {
+    admin: {
+      findOne: async ({ email }) => (email === "admin@demo.com" ? { _id: "admin-1" } : null),
+    },
+    donante: {
+      findOne: async ({ email }) => (email === "shared@demo.com" ? { _id: "donante-1" } : null),
+    },
+    recolector: {
+      findOne: async ({ email }) => (email === "other@demo.com" ? { _id: "recolector-1" } : null),
+    },
+  };
+
+  assert.ok(await findPublicAccountEmailConflict("shared@demo.com", "donante", models));
+  assert.equal(await findPublicAccountEmailConflict("shared@demo.com", "recolector", models), null);
+  assert.ok(await findPublicAccountEmailConflict("admin@demo.com", "recolector", models));
 });
 
 test("email-role migration refuses normalized duplicate accounts without changing indexes", async () => {
