@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
+    "migrate:account-email-role": "node scripts/migrate_account_email_role.mjs",
     "migrate:categories": "node scripts/migrate_category_catalog.mjs",
     "migrate:campaign-requirements": "node scripts/migrate_campaign_requirements.mjs",
     "test": "node --test test/*.test.js"

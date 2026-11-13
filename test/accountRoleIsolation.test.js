@@ -78,7 +78,7 @@ test("public email policy allows the same address across donor and collector rol
   );
 });
 
-test("donor and collector model records keep separate IDs and enforce unique email per role", () => {
+test("donor and collector model records keep separate IDs and enforce a compound email-role index", () => {
   const email = "shared@example.test";
   const donor = new Donante({
     nombre: "A",
@@ -99,9 +99,15 @@ test("donor and collector model records keep separate IDs and enforce unique ema
   assert.equal(collector.rol, "recolector");
   for (const Model of [Donante, Recolector]) {
     assert.ok(Model.schema.indexes().some(([keys, options]) =>
-      keys.email === 1 && options.unique === true
+      keys.email === 1 && keys.rol === 1 && options.unique === true
     ));
+    assert.equal(Model.schema.indexes().some(([keys, options]) =>
+      Object.keys(keys).length === 1 && keys.email === 1 && options.unique === true
+    ), false);
   }
+  assert.ok(Admin.schema.indexes().some(([keys, options]) =>
+    Object.keys(keys).length === 1 && keys.email === 1 && options.unique === true
+  ));
 });
 
 test("donor and collector logins independently issue role-scoped JWTs", async (t) => {
@@ -140,7 +146,11 @@ test("donor and collector logins independently issue role-scoped JWTs", async (t
   }, donorResponse);
   const collectorResponse = response();
   await loginRecolector({
-    body: { email: collector.email, password: "collector-password" },
+    body: {
+      email: collector.email,
+      password: "collector-password",
+      rol: "recolector",
+    },
   }, collectorResponse);
 
   const donorClaims = jwt.decode(donorResponse.body.token);
@@ -150,6 +160,22 @@ test("donor and collector logins independently issue role-scoped JWTs", async (t
   assert.equal(collectorClaims.id, collector._id);
   assert.equal(collectorClaims.rol, "recolector");
   assert.notEqual(donorClaims.id, collectorClaims.id);
+});
+
+test("login rejects a selected role that does not match the existing role-specific route", async () => {
+  const donorResponse = response();
+  await login({
+    body: { email: "shared@example.test", password: "pass", rol: "recolector" },
+  }, donorResponse);
+  assert.equal(donorResponse.statusCode, 400);
+  assert.match(donorResponse.body.msg, /rol seleccionado/);
+
+  const collectorResponse = response();
+  await loginRecolector({
+    body: { email: "shared@example.test", password: "pass", rol: "donante" },
+  }, collectorResponse);
+  assert.equal(collectorResponse.statusCode, 400);
+  assert.match(collectorResponse.body.msg, /rol seleccionado/);
 });
 
 test("JWT authentication selects the claimed account model and role guard blocks cross-role access", async (t) => {

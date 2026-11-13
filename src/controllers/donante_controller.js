@@ -409,6 +409,13 @@ const crearNuevoPassword = async (req, res) => {
 const login = async (req, res) => {
   try {
     const { email, password } = req.body || {};
+    const selectedRole = req.body?.rol;
+    if (selectedRole !== undefined &&
+        String(selectedRole).trim().toLowerCase() !== "donante") {
+      return res.status(400).json({
+        msg: "El rol seleccionado no corresponde a este inicio de sesión",
+      });
+    }
     const faltantes = requireFields(req.body, ["email", "password"]);
     if (faltantes.length > 0) {
       return res
@@ -417,7 +424,11 @@ const login = async (req, res) => {
     }
 
     const normalizedEmail = (email || "").trim().toLowerCase();
-    const donante = await Donante.findOne({ email: normalizedEmail }).select(
+    const donante = await Donante.findOne({
+      email: normalizedEmail,
+      rol: "donante",
+      rolMigradoA: null,
+    }).select(
       "-__v -token -updatedAt -createdAt +password"
     );
     if (!donante)

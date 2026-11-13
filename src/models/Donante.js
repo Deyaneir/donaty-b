@@ -19,7 +19,7 @@ const donanteSchema = new Schema(
     cargoAsociacion: { type: String, default: "", trim: true },
     aceptaTerminos: { type: Boolean, default: false },
     aceptaPrivacidad: { type: Boolean, default: false },
-    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    email: { type: String, required: true, lowercase: true, trim: true },
     googleId: { type: String, default: null, index: true },
     password: { type: String, required: true, select: false },
     rol: {
@@ -44,6 +44,8 @@ const donanteSchema = new Schema(
   },
   { timestamps: true }
 );
+
+donanteSchema.index({ email: 1, rol: 1 }, { unique: true });
 
 donanteSchema.pre("save", async function (next) {
   if (!this.isModified("password")) return next();
