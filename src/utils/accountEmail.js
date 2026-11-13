@@ -16,6 +16,8 @@ const findPublicAccountEmailConflict = async (
     throw new Error("El rol público de cuenta no es válido");
   }
 
+  // La regla de negocio es por rol: un correo puede reutilizarse entre
+  // donante y recolector, pero no dentro del mismo tipo de cuenta ni para admin.
   const [sameRoleAccount, adminAccount] = await Promise.all([
     accountModel.findOne({ email }),
     models.admin.findOne({ email }),
@@ -23,4 +25,9 @@ const findPublicAccountEmailConflict = async (
   return sameRoleAccount || adminAccount || null;
 };
 
-export { findPublicAccountEmailConflict };
+const registrationConflictMessage = (role) => {
+  const label = role === "donante" ? "donante" : "recolector";
+  return `El email ya se encuentra registrado para este tipo de cuenta (${label})`;
+};
+
+export { findPublicAccountEmailConflict, registrationConflictMessage };

@@ -16,7 +16,10 @@ import {
   verificarRefreshToken,
 } from "../middlewares/JWT.js";
 import { isBlank, requireFields } from "../utils/validation.js";
-import { findPublicAccountEmailConflict } from "../utils/accountEmail.js";
+import {
+  findPublicAccountEmailConflict,
+  registrationConflictMessage,
+} from "../utils/accountEmail.js";
 
 const RECOVERY_TOKEN_MINUTES = 60;
 
@@ -186,7 +189,7 @@ const registro = async (req, res) => {
     if (await findPublicAccountEmailConflict(normalizedEmail, "donante")) {
       return res
         .status(409)
-        .json({ msg: "Lo sentimos, el email ya se encuentra registrado" });
+        .json({ msg: registrationConflictMessage("donante") });
     }
 
     const nuevoDonante = new Donante({
@@ -563,8 +566,8 @@ const actualizarPerfil = async (req, res) => {
     if (normalizedEmail && donante.email !== normalizedEmail) {
       if (await findPublicAccountEmailConflict(normalizedEmail, "donante")) {
         return res
-          .status(404)
-          .json({ msg: "El email ya se encuentra registrado" });
+          .status(409)
+          .json({ msg: registrationConflictMessage("donante") });
       }
       donante.email = normalizedEmail;
     }

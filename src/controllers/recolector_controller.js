@@ -16,7 +16,10 @@ import {
   verificarRefreshToken,
 } from "../middlewares/JWT.js";
 import { isBlank, requireFields } from "../utils/validation.js";
-import { findPublicAccountEmailConflict } from "../utils/accountEmail.js";
+import {
+  findPublicAccountEmailConflict,
+  registrationConflictMessage,
+} from "../utils/accountEmail.js";
 import {
   buildPointCollectorAssignmentFilter,
   serializeCollectorAssignments,
@@ -78,7 +81,7 @@ const registroRecolector = async (req, res) => {
     if (await findPublicAccountEmailConflict(normalizedEmail, "recolector")) {
       return res
         .status(409)
-        .json({ msg: "Lo sentimos, el email ya se encuentra registrado" });
+        .json({ msg: registrationConflictMessage("recolector") });
     }
 
     const nuevoRecolector = new Recolector({
@@ -408,8 +411,8 @@ const actualizarPerfilRecolector = async (req, res) => {
     if (normalizedEmail && recolector.email !== normalizedEmail) {
       if (await findPublicAccountEmailConflict(normalizedEmail, "recolector")) {
         return res
-          .status(404)
-          .json({ msg: "El email ya se encuentra registrado" });
+          .status(409)
+          .json({ msg: registrationConflictMessage("recolector") });
       }
       recolector.email = normalizedEmail;
     }
