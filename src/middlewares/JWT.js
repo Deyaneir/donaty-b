@@ -44,11 +44,17 @@ const authMiddleware = async (req, res, next) => {
     }
 
     const role = String(decoded?.rol || "").toLowerCase();
-    let model = Donante;
-    if (role === "admin") model = Admin;
-    if (role === "recolector") model = Recolector;
+    const modelByRole = {
+      admin: Admin,
+      donante: Donante,
+      recolector: Recolector,
+    };
+    const model = modelByRole[role];
+    if (!model || !decoded?.id) {
+      return res.status(401).json({ msg: "Token inválido" });
+    }
     const user = await model.findById(decoded.id);
-    if (!user) {
+    if (!user || String(user.rol || "").toLowerCase() !== role) {
       return res.status(401).json({ msg: "Usuario no autorizado" });
     }
     if (user.status === false) {

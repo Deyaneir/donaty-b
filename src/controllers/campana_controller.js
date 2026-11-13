@@ -181,14 +181,9 @@ const listAvailableCollectorsForCampaign = async (campaign) => {
     )
   )];
   const reservationCampaigns = reservationCampaignIds.length
-    ? await (session
-        ? Campana.find({ _id: { $in: reservationCampaignIds } })
-            .select("_id estado activa puntosRecoleccion")
-            .session(session)
-            .lean()
-        : Campana.find({ _id: { $in: reservationCampaignIds } })
-            .select("_id estado activa puntosRecoleccion")
-            .lean())
+    ? await Campana.find({ _id: { $in: reservationCampaignIds } })
+        .select("_id estado activa puntosRecoleccion")
+        .lean()
     : [];
   const collectorsWithCurrentReservations = eligibleCollectors.map((collector) => ({
     ...collector,
@@ -2860,6 +2855,7 @@ export {
   campaignDateRangesOverlap,
   normalizeCampaignResponsibilities,
   buildPointAssignmentsAfterRoleChange,
+  listAvailableCollectorsForCampaign,
   assertNoOverlappingAssignments,
   validateAssignableCollectors,
   reserveCollectorsForCampaign,

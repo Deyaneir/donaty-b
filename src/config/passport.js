@@ -3,7 +3,6 @@ import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import crypto from "crypto";
 import Donante from "../models/Donante.js";
 import Admin from "../models/Admin.js";
-import Recolector from "../models/Recolector.js";
 
 const buildCallbackUrl = () => {
   const base =
@@ -30,13 +29,10 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
             return done(null, false, { message: "Google no devolvió email" });
           }
 
-          const [adminExistente, recolectorExistente] = await Promise.all([
-            Admin.findOne({ email }),
-            Recolector.findOne({ email }),
-          ]);
-          if (adminExistente || recolectorExistente) {
+          const adminExistente = await Admin.findOne({ email });
+          if (adminExistente) {
             return done(null, false, {
-              message: "El email ya está registrado en otro rol",
+              message: "El correo está reservado para una cuenta administradora",
             });
           }
 

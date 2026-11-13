@@ -16,6 +16,7 @@ import {
   verificarRefreshToken,
 } from "../middlewares/JWT.js";
 import { isBlank, requireFields } from "../utils/validation.js";
+import { findPublicAccountEmailConflict } from "../utils/accountEmail.js";
 import {
   buildPointCollectorAssignmentFilter,
   serializeCollectorAssignments,
@@ -74,14 +75,9 @@ const registroRecolector = async (req, res) => {
     }
 
     const normalizedEmail = (email || "").trim().toLowerCase();
-    const [verificarEmailBDD, verificarEmailAdmin, verificarEmailRecolector] = await Promise.all([
-      Donante.findOne({ email: normalizedEmail }),
-      Admin.findOne({ email: normalizedEmail }),
-      Recolector.findOne({ email: normalizedEmail }),
-    ]);
-    if (verificarEmailBDD || verificarEmailAdmin || verificarEmailRecolector) {
+    if (await findPublicAccountEmailConflict(normalizedEmail, "recolector")) {
       return res
-        .status(400)
+        .status(409)
         .json({ msg: "Lo sentimos, el email ya se encuentra registrado" });
     }
 
@@ -114,6 +110,11 @@ const registroRecolector = async (req, res) => {
       .json({ msg: "Revisa tu correo electrónico para confirmar tu cuenta" });
   } catch (error) {
     console.error(error);
+    if (error?.code === 11000) {
+      return res.status(409).json({
+        msg: "Ya existe una cuenta con ese correo y rol",
+      });
+    }
     res.status(500).json({ msg: `❌ Error en el servidor - ${error}` });
   }
 };
@@ -321,6 +322,9 @@ const refreshRecolectorSession = async (req, res) => {
     }
 
     const decoded = verificarRefreshToken(refreshToken);
+    if (String(decoded.rol || "").toLowerCase() !== "recolector") {
+      return res.status(401).json({ msg: "Refresh token de otro rol" });
+    }
     const recolector = await Recolector.findById(decoded.id);
     if (!recolector) {
       return res.status(401).json({ msg: "Usuario no autorizado" });
@@ -393,12 +397,7 @@ const actualizarPerfilRecolector = async (req, res) => {
 
     const normalizedEmail = email ? email.trim().toLowerCase() : undefined;
     if (normalizedEmail && recolector.email !== normalizedEmail) {
-      const [emailExistente, emailAdmin, emailRecolector] = await Promise.all([
-        Donante.findOne({ email: normalizedEmail }),
-        Admin.findOne({ email: normalizedEmail }),
-        Recolector.findOne({ email: normalizedEmail }),
-      ]);
-      if (emailExistente || emailAdmin || emailRecolector) {
+      if (await findPublicAccountEmailConflict(normalizedEmail, "recolector")) {
         return res
           .status(404)
           .json({ msg: "El email ya se encuentra registrado" });

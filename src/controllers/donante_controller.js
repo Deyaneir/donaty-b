@@ -16,13 +16,12 @@ import {
   verificarRefreshToken,
 } from "../middlewares/JWT.js";
 import { isBlank, requireFields } from "../utils/validation.js";
+import { findPublicAccountEmailConflict } from "../utils/accountEmail.js";
 
 const RECOVERY_TOKEN_MINUTES = 60;
 
 const isValidToken = (token = "") =>
   typeof token === "string" && token.trim().length === 32;
-const isEpnEmail = (email = "") =>
-  String(email).trim().toLowerCase().endsWith("@epn.edu.ec");
 const isTokenExpired = (doc) =>
   Boolean(doc?.tokenExpires && doc.tokenExpires < new Date());
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -31,16 +30,35 @@ const reenviarConfirmacion = async (req, res) => {
   try {
     const { email, origen } = req.body || {};
     const normalizedEmail = String(email || "").trim().toLowerCase();
+    const role = String(req.body?.rol || "").trim().toLowerCase();
     if (!emailPattern.test(normalizedEmail)) {
       return res.status(400).json({ msg: "Debes ingresar un correo válido" });
     }
+    if (role && !["donante", "recolector", "admin"].includes(role)) {
+      return res.status(400).json({ msg: "El rol indicado no es válido" });
+    }
 
-    const cuentas = await Promise.all([
-      Donante.findOne({ email: normalizedEmail, rolMigradoA: null }),
-      Recolector.findOne({ email: normalizedEmail, rolMigradoA: null }),
-      Admin.findOne({ email: normalizedEmail }),
-    ]);
-    const cuenta = cuentas.find((item) => item && !item.confirmEmail);
+    const modelosPorRol = {
+      donante: Donante,
+      recolector: Recolector,
+      admin: Admin,
+    };
+    const modelos = role
+      ? [modelosPorRol[role]]
+      : Object.values(modelosPorRol);
+    const cuentas = await Promise.all(modelos.map((Modelo) => Modelo.findOne({
+      email: normalizedEmail,
+      ...(Modelo === Donante || Modelo === Recolector
+        ? { rolMigradoA: null }
+        : {}),
+    })));
+    const cuentasPendientes = cuentas.filter((item) => item && !item.confirmEmail);
+    if (!role && cuentasPendientes.length > 1) {
+      return res.status(409).json({
+        msg: "Hay varias cuentas pendientes con ese correo; indica el rol para reenviar la confirmación",
+      });
+    }
+    const cuenta = cuentasPendientes[0];
     if (!cuenta) {
       return res.status(200).json({
         msg: "Si existe una cuenta pendiente con ese correo, enviaremos un enlace de confirmación",
@@ -99,14 +117,45 @@ const solicitarContactoAdmin = async (req, res) => {
   }
 };
 
-// La recuperación de contraseña desde la app sirve para donantes y recolectores.
-const findResetAccountByEmail = async (email) =>
-  (await Donante.findOne({ email, rolMigradoA: null }))
-  || (await Recolector.findOne({ email, rolMigradoA: null }));
+const findResetAccountByEmail = async (email, role) => {
+  const accountModels = {
+    donante: Donante,
+    recolector: Recolector,
+  };
+  if (role && !accountModels[role]) {
+    const error = new Error("El rol indicado no es válido para recuperar la cuenta");
+    error.statusCode = 400;
+    throw error;
+  }
+  const models = role
+    ? [accountModels[role]]
+    : Object.values(accountModels);
+  const accounts = (await Promise.all(models.map((Model) => Model.findOne({
+    email,
+    rolMigradoA: null,
+  })))).filter(Boolean);
+  if (accounts.length > 1) {
+    const error = new Error(
+      "Hay varias cuentas con ese correo; indica si deseas recuperar donante o recolector"
+    );
+    error.statusCode = 409;
+    throw error;
+  }
+  return accounts[0] || null;
+};
 
-const findResetAccountByToken = async (token) =>
-  (await Donante.findOne({ token, rolMigradoA: null }))
-  || (await Recolector.findOne({ token, rolMigradoA: null }));
+const findResetAccountByToken = async (token) => {
+  const accounts = (await Promise.all([
+    Donante.findOne({ token, rolMigradoA: null }),
+    Recolector.findOne({ token, rolMigradoA: null }),
+  ])).filter(Boolean);
+  if (accounts.length > 1) {
+    const error = new Error("El token de recuperación no identifica una cuenta única");
+    error.statusCode = 409;
+    throw error;
+  }
+  return accounts[0] || null;
+};
 
 const registro = async (req, res) => {
   try {
@@ -133,20 +182,10 @@ const registro = async (req, res) => {
       return res.status(400).json({ msg: mobileProfile.error });
     }
 
-    const normalizedEmail = (email || "").trim().toLowerCase();
-    if (isEpnEmail(normalizedEmail)) {
-      return res.status(400).json({
-        msg: "Los correos @epn.edu.ec deben registrarse como administrador",
-      });
-    }
-    const [verificarEmailBDD, verificarEmailAdmin, verificarEmailRecolector] = await Promise.all([
-      Donante.findOne({ email: normalizedEmail }),
-      Admin.findOne({ email: normalizedEmail }),
-      Recolector.findOne({ email: normalizedEmail }),
-    ]);
-    if (verificarEmailBDD || verificarEmailAdmin || verificarEmailRecolector) {
+    const normalizedEmail = String(email || "").trim().toLowerCase();
+    if (await findPublicAccountEmailConflict(normalizedEmail, "donante")) {
       return res
-        .status(400)
+        .status(409)
         .json({ msg: "Lo sentimos, el email ya se encuentra registrado" });
     }
 
@@ -181,6 +220,11 @@ const registro = async (req, res) => {
       .json({ msg: "Revisa tu correo electrónico para confirmar tu cuenta" });
   } catch (error) {
     console.error(error);
+    if (error?.code === 11000) {
+      return res.status(409).json({
+        msg: "Ya existe una cuenta con ese correo y rol",
+      });
+    }
     res.status(500).json({ msg: `❌ Error en el servidor - ${error}` });
   }
 };
@@ -224,6 +268,9 @@ const confirmarMail = async (req, res) => {
     });
   } catch (error) {
     console.error(error);
+    if (error?.statusCode) {
+      return res.status(error.statusCode).json({ msg: error.message });
+    }
     res.status(500).json({ msg: `❌ Error en el servidor - ${error}` });
   }
 };
@@ -232,13 +279,14 @@ const recuperarPassword = async (req, res) => {
   try {
     const { email, origen } = req.body || {};
     const esMovil = origen === "movil";
+    const role = String(req.body?.rol || "").trim().toLowerCase();
     if (isBlank(email))
       return res
         .status(400)
         .json({ msg: "Debes ingresar un correo electrónico" });
 
     const normalizedEmail = email.trim().toLowerCase();
-    const cuenta = await findResetAccountByEmail(normalizedEmail);
+    const cuenta = await findResetAccountByEmail(normalizedEmail, role);
     if (!cuenta)
       return res
         .status(404)
@@ -261,6 +309,9 @@ const recuperarPassword = async (req, res) => {
     });
   } catch (error) {
     console.error(error);
+    if (error?.statusCode) {
+      return res.status(error.statusCode).json({ msg: error.message });
+    }
     res.status(500).json({ msg: `❌ Error en el servidor - ${error}` });
   }
 };
@@ -287,6 +338,9 @@ const comprobarTokenPasword = async (req, res) => {
       .json({ msg: "Token confirmado, ya puedes crear tu nuevo password" });
   } catch (error) {
     console.error(error);
+    if (error?.statusCode) {
+      return res.status(error.statusCode).json({ msg: error.message });
+    }
     res.status(500).json({ msg: `❌ Error en el servidor - ${error}` });
   }
 };
@@ -345,6 +399,9 @@ const crearNuevoPassword = async (req, res) => {
     });
   } catch (error) {
     console.error(error);
+    if (error?.statusCode) {
+      return res.status(error.statusCode).json({ msg: error.message });
+    }
     res.status(500).json({ msg: `❌ Error en el servidor - ${error}` });
   }
 };
@@ -423,6 +480,9 @@ const refreshDonanteSession = async (req, res) => {
     }
 
     const decoded = verificarRefreshToken(refreshToken);
+    if (String(decoded.rol || "").toLowerCase() !== "donante") {
+      return res.status(401).json({ msg: "Refresh token de otro rol" });
+    }
     const donante = await Donante.findById(decoded.id);
     if (!donante) {
       return res.status(401).json({ msg: "Usuario no autorizado" });
@@ -490,12 +550,7 @@ const actualizarPerfil = async (req, res) => {
 
     const normalizedEmail = email ? email.trim().toLowerCase() : undefined;
     if (normalizedEmail && donante.email !== normalizedEmail) {
-      const [emailExistente, emailAdmin, emailRecolector] = await Promise.all([
-        Donante.findOne({ email: normalizedEmail }),
-        Admin.findOne({ email: normalizedEmail }),
-        Recolector.findOne({ email: normalizedEmail }),
-      ]);
-      if (emailExistente || emailAdmin || emailRecolector) {
+      if (await findPublicAccountEmailConflict(normalizedEmail, "donante")) {
         return res
           .status(404)
           .json({ msg: "El email ya se encuentra registrado" });

@@ -57,12 +57,9 @@ const verifyGoogleIdentity = async (idToken, audiences) => {
 };
 
 const findOrCreateGoogleDonante = async ({ googleId, email, nombre, apellido }) => {
-  const [adminExistente, recolectorExistente] = await Promise.all([
-    Admin.findOne({ email }),
-    Recolector.findOne({ email, rolMigradoA: null }),
-  ]);
-  if (adminExistente || recolectorExistente) {
-    const error = new Error("El email ya está registrado en otro rol");
+  const adminExistente = await Admin.findOne({ email });
+  if (adminExistente) {
+    const error = new Error("El correo está reservado para una cuenta administradora");
     error.statusCode = 409;
     throw error;
   }

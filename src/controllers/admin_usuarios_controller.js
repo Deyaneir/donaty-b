@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import Donante from "../models/Donante.js";
 import Recolector from "../models/Recolector.js";
+import Admin from "../models/Admin.js";
 import { migrateUserRole } from "../services/userRoleMigration.js";
 
 // Solo se gestionan donantes y recolectores. El rol de administrador nunca se
@@ -146,11 +147,16 @@ const actualizarDatosUsuario = async (req, res) => {
     }
 
     if (updates.email !== undefined && updates.email !== usuario.email) {
-      const [donante, recolector] = await Promise.all([
-        Donante.findOne({ email: updates.email, _id: { $ne: id } }).select("_id"),
-        Recolector.findOne({ email: updates.email, _id: { $ne: id } }).select("_id"),
+      const ModeloDestino = getModelo(targetRole);
+      const [cuentaMismoRol, admin] = await Promise.all([
+        ModeloDestino.findOne({
+          email: updates.email,
+          _id: { $ne: id },
+          rolMigradoA: null,
+        }).select("_id"),
+        Admin.findOne({ email: updates.email }).select("_id"),
       ]);
-      if (donante || recolector) {
+      if (cuentaMismoRol || admin) {
         return res.status(409).json({ msg: "El correo ya está registrado" });
       }
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(updates.email)) {

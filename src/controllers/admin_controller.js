@@ -283,6 +283,9 @@ const refreshAdminSession = async (req, res) => {
     }
 
     const decoded = verificarRefreshToken(refreshToken);
+    if (String(decoded.rol || "").toLowerCase() !== "admin") {
+      return res.status(401).json({ msg: "Refresh token de otro rol" });
+    }
     const admin = await Admin.findById(decoded.id);
     if (!admin) {
       return res.status(401).json({ msg: "Usuario no autorizado" });
