@@ -116,12 +116,23 @@ const getAvailableCollectorsForCampaign = (collectors, assignedCampaigns, campai
     if (reservationConflict) return false;
 
     return !(assignedCampaigns || []).some((other) =>
-      (other.puntosRecoleccion || []).some((point) =>
-        (point.recolectores || []).some((id) => String(id) === collectorId)
-        && availabilityPoints.some((candidatePoint) =>
-          hasCampaignScheduleOverlap(campaign, candidatePoint, other, point)
+      (other.puntosRecoleccion || [])
+        .filter((point) =>
+          point.activo !== false
+          && String(point.estado || "").toLowerCase() !== "inactivo"
         )
-      )
+        .some((point) => {
+          const assignedCollectorIds = [
+            ...(point.recolectores || []).map((id) => String(id?._id ?? id)),
+            ...(point.responsableRecolector
+              ? [String(point.responsableRecolector?._id ?? point.responsableRecolector)]
+              : []),
+          ];
+          return assignedCollectorIds.includes(collectorId)
+            && availabilityPoints.some((candidatePoint) =>
+              hasCampaignScheduleOverlap(campaign, candidatePoint, other, point)
+            );
+        })
     );
   });
 };
@@ -143,6 +154,12 @@ const filterCurrentCollectorReservations = (
     }
 
     return (campaign.puntosRecoleccion || []).some((point) => {
+      if (
+        point.activo === false
+        || String(point.estado || "").toLowerCase() === "inactivo"
+      ) {
+        return false;
+      }
       const pointId = String(point._id);
       const assigned = (point.recolectores || []).some(
         (id) => String(id?._id ?? id) === normalizedCollectorId

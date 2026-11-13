@@ -100,6 +100,49 @@ test("availability excludes inactive accounts and scheduled conflicts but retain
   );
 });
 
+test("assignments on inactive points do not make collectors unavailable", () => {
+  const requested = campaign({
+    _id: "requested",
+    puntosRecoleccion: [{ activo: true, horariosAtencion: [] }],
+  });
+  const existing = campaign({
+    _id: "existing",
+    puntosRecoleccion: [{
+      _id: "inactive-point",
+      activo: false,
+      estado: "inactivo",
+      recolectores: ["collector-inactive-point"],
+      horariosAtencion: [],
+    }, {
+      _id: "active-point",
+      activo: true,
+      responsableRecolector: "collector-active-point",
+      recolectores: ["collector-active-point"],
+      horariosAtencion: [{ diaSemana: 1, horaInicio: "09:00", horaFin: "12:00" }],
+    }],
+  });
+  const collectors = [
+    {
+      _id: "collector-inactive-point",
+      status: true,
+      aprobado: true,
+      confirmEmail: true,
+    },
+    {
+      _id: "collector-active-point",
+      status: true,
+      aprobado: true,
+      confirmEmail: true,
+    },
+  ];
+
+  assert.deepEqual(
+    getAvailableCollectorsForCampaign(collectors, [existing], requested)
+      .map(({ _id }) => _id),
+    ["collector-inactive-point"]
+  );
+});
+
 test("stale collector reservations do not block availability when the campaign no longer assigns them", () => {
   const collectorId = "collector-1";
   const currentCampaign = {
@@ -107,12 +150,20 @@ test("stale collector reservations do not block availability when the campaign n
     estado: "borrador",
     puntosRecoleccion: [{
       _id: "point-current",
+      activo: true,
       responsableRecolector: collectorId,
       recolectores: [collectorId],
+    }, {
+      _id: "point-inactive",
+      activo: false,
+      estado: "inactivo",
+      responsableRecolector: "collector-inactive",
+      recolectores: ["collector-inactive"],
     }],
   };
   const reservations = [
     { campana: "current", punto: { _id: "point-current" } },
+    { campana: "current", punto: { _id: "point-inactive" } },
     { campana: "removed-assignment", punto: { _id: "point-old" } },
     { campana: "deleted-campaign", punto: { _id: "point-deleted" } },
     { campana: "disabled-campaign", punto: { _id: "point-disabled" } },
@@ -135,6 +186,14 @@ test("stale collector reservations do not block availability when the campaign n
     filterCurrentCollectorReservations(reservations, campaigns, collectorId)
       .map((reservation) => reservation.campana),
     ["current"]
+  );
+  assert.deepEqual(
+    filterCurrentCollectorReservations(
+      reservations,
+      campaigns,
+      "collector-inactive"
+    ),
+    []
   );
 });
 
