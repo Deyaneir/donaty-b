@@ -2,6 +2,7 @@ import { Router } from "express";
 import auth from "../middlewares/JWT.js";
 import requireRole from "../middlewares/requireRole.js";
 import rejectClosedCampaignMutation from "../middlewares/rejectClosedCampaignMutation.js";
+import offlineIdempotency from "../middlewares/offlineIdempotency.js";
 
 import {
   listarCampanas,
@@ -78,12 +79,14 @@ router.post(
   "/:campaignId/entrega-general",
   auth,
   requireRole("recolector"),
+  offlineIdempotency("campaign.delivery.register"),
   registrarEntregaGeneral
 );
 router.post(
   "/:campanaId/entrega",
   auth,
   requireRole("recolector"),
+  offlineIdempotency("campaign.delivery.register"),
   registrarEntregaGeneral
 );
 router.delete(

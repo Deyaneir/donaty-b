@@ -24,6 +24,14 @@ import {
   getDashboardStats,
 } from "../controllers/dashboard_controller.js";
 import { googleAdminMobileLogin } from "../controllers/google_controller.js";
+import {
+  listDonationTrace,
+  listDonorCampaignDonations,
+  listHistorialDonanteDetail,
+  listHistorialDonantes,
+  listHistorialRecolectorDetail,
+  listHistorialRecolectores,
+} from "../controllers/admin_history_controller.js";
 
 const router = Router();
 
@@ -51,5 +59,14 @@ router.patch("/users/:id/role", actualizarRol);
 router.patch("/users/:id/status", actualizarStatus);
 router.patch("/recolectores/:id/status", actualizarStatusRecolector);
 router.put("/actualizarpassword/:id", actualizarPasswordAdmin);
+router.get("/historial/recolectores", listHistorialRecolectores);
+router.get("/historial/recolectores/:recolectorId", listHistorialRecolectorDetail);
+router.get("/historial/donantes", listHistorialDonantes);
+router.get("/historial/donantes/:donanteId", listHistorialDonanteDetail);
+router.get(
+  "/historial/donantes/:donanteId/campanas/:campanaId/donaciones",
+  listDonorCampaignDonations
+);
+router.get("/historial/donaciones/:donacionId/trazabilidad", listDonationTrace);
 
 export default router;

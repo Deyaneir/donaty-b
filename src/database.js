@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import Categoria from "./models/Categoria.js";
+import OfflineOperation from "./models/OfflineOperation.js";
 
 const CATEGORY_INDEX_NAME = "campana_1_nombreNormalizado_1";
 const CATEGORY_INDEX_KEY = { campana: 1, nombreNormalizado: 1 };
@@ -54,6 +55,7 @@ const connectDB = async (uri) => {
   try {
     await mongoose.connect(uri);
     await ensureCategoryIndex();
+    await OfflineOperation.createIndexes();
     console.log("MongoDB conectado");
   } catch (error) {
     console.error("Error conectando a MongoDB", error.message);

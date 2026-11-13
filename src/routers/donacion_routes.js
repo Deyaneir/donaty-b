@@ -6,6 +6,7 @@ import requirePerfilCompleto from "../middlewares/requirePerfilCompleto.js";
 import rejectClosedCampaignMutation from "../middlewares/rejectClosedCampaignMutation.js";
 import { analyzeDonationImage } from "../controllers/donacion_imagen_controller.js";
 import { subirEvidenciaDonacion } from "../controllers/donacion_evidencia_controller.js";
+import offlineIdempotency from "../middlewares/offlineIdempotency.js";
 
 import {
   crearDonacion,
@@ -45,6 +46,7 @@ router.post(
 router.post(
   "/:id/evidencias",
   requireRole("recolector"),
+  offlineIdempotency("donation.evidence.upload"),
   rejectClosedCampaignMutation("donation"),
   subirEvidenciaDonacion
 );
@@ -59,6 +61,7 @@ router.post(
 router.post(
   "/",
   requireRole("donante"),
+  offlineIdempotency("donation.create.donor"),
   rejectClosedCampaignMutation("donationCreate"),
   crearDonacion
 );
@@ -89,6 +92,7 @@ router.delete("/:id/admin", requireRole("admin"), rejectClosedCampaignMutation("
 router.post(
   "/registrar-por-recolector",
   requireRole("recolector"),
+  offlineIdempotency("donation.create.collector"),
   rejectClosedCampaignMutation("donationCreate"),
   crearDonacionRecolector
 );
@@ -101,13 +105,13 @@ router.get(
   requireRole("admin", "donante", "recolector"),
   leerDonacionQR
 );
-router.patch("/:id/asignar", requireRole("recolector"), rejectClosedCampaignMutation("donation"), asignarRecolector);
-router.patch("/:id/pendiente-recoleccion", requireRole("recolector"), rejectClosedCampaignMutation("donation"), marcarPendienteRecoleccion);
-router.patch("/:id/recolectar", requireRole("recolector"), rejectClosedCampaignMutation("donation"), marcarRecolectada);
-router.patch("/:id/clasificar", requireRole("recolector"), rejectClosedCampaignMutation("donation"), marcarClasificada);
-router.patch("/:id/iniciar-entrega", requireRole("recolector"), rejectClosedCampaignMutation("donation"), iniciarEntrega);
-router.patch("/:id/devolucion", requireRole("recolector"), rejectClosedCampaignMutation("donation"), solicitarDevolucion);
-router.patch("/:id/confirmar-devolucion", requireRole("recolector"), rejectClosedCampaignMutation("donation"), confirmarDevolucion);
-router.patch("/:id/entregar", requireRole("recolector"), rejectClosedCampaignMutation("donation"), marcarEntregada);
+router.patch("/:id/asignar", requireRole("recolector"), offlineIdempotency("donation.assign"), rejectClosedCampaignMutation("donation"), asignarRecolector);
+router.patch("/:id/pendiente-recoleccion", requireRole("recolector"), offlineIdempotency("donation.pending_collection"), rejectClosedCampaignMutation("donation"), marcarPendienteRecoleccion);
+router.patch("/:id/recolectar", requireRole("recolector"), offlineIdempotency("donation.collect"), rejectClosedCampaignMutation("donation"), marcarRecolectada);
+router.patch("/:id/clasificar", requireRole("recolector"), offlineIdempotency("donation.classify"), rejectClosedCampaignMutation("donation"), marcarClasificada);
+router.patch("/:id/iniciar-entrega", requireRole("recolector"), offlineIdempotency("donation.start_delivery"), rejectClosedCampaignMutation("donation"), iniciarEntrega);
+router.patch("/:id/devolucion", requireRole("recolector"), offlineIdempotency("donation.request_return"), rejectClosedCampaignMutation("donation"), solicitarDevolucion);
+router.patch("/:id/confirmar-devolucion", requireRole("recolector"), offlineIdempotency("donation.confirm_return"), rejectClosedCampaignMutation("donation"), confirmarDevolucion);
+router.patch("/:id/entregar", requireRole("recolector"), offlineIdempotency("donation.deliver"), rejectClosedCampaignMutation("donation"), marcarEntregada);
 
 export default router;
