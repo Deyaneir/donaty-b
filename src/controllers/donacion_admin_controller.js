@@ -223,6 +223,9 @@ const asignarDonacionAdmin = async (req, res) => {
     if (!actual) {
       return res.status(404).json({ msg: "Donación no encontrada" });
     }
+    const previousCollector = actual.recolector
+      ? await Recolector.findById(actual.recolector)
+      : null;
     if (actual.campana) {
       const campaign = await Campana.findById(actual.campana)
         .select("puntosRecoleccion")
@@ -362,8 +365,45 @@ const asignarDonacionAdmin = async (req, res) => {
         donationId: String(donacion._id),
         campanaId: String(donacion.campana?._id ?? donacion.campana ?? ""),
         campaignId: String(donacion.campana?._id ?? donacion.campana ?? ""),
+        campaignName: String(donacion.campana?.nombre || ""),
+        donorId: String(donacion.donante?._id || ""),
+        donorName: donacion.donante
+          ? `${donacion.donante.nombre || ""} ${donacion.donante.apellido || ""}`.trim()
+          : "",
+        previousCollectorId: String(previousCollector?._id || ""),
+        previousCollectorName: previousCollector
+          ? `${previousCollector.nombre || ""} ${previousCollector.apellido || ""}`.trim()
+          : "",
+        newCollectorId: String(recolector._id),
+        newCollectorName: nombreCompleto(recolector),
+        collectorId: String(recolector._id),
+        collectorName: nombreCompleto(recolector),
+        changedById: String(req.user._id),
+        changedByName: nombreCompleto(req.user),
+        changedByRole: "admin",
       },
     });
+    if (reasignacion && previousCollector) {
+      void notifyUsers({
+        eventKey: `donation-reassignment-removed:${donacion._id}:${previousCollector._id}:${fechaAsignacion.getTime()}`,
+        recipients: [{ userId: previousCollector._id, role: "recolector" }],
+        title: "Asignación actualizada",
+        body: `Ya no eres responsable de la donación ${donacion._id}; fue reasignada a ${nombreCompleto(recolector)}.`,
+        data: {
+          type: "donation_reassignment_removed",
+          donationId: String(donacion._id),
+          campaignId: String(donacion.campana?._id ?? donacion.campana ?? ""),
+          campaignName: String(donacion.campana?.nombre || ""),
+          previousCollectorId: String(previousCollector._id),
+          previousCollectorName: `${previousCollector.nombre || ""} ${previousCollector.apellido || ""}`.trim(),
+          newCollectorId: String(recolector._id),
+          newCollectorName: nombreCompleto(recolector),
+          changedById: String(req.user._id),
+          changedByName: nombreCompleto(req.user),
+          changedByRole: "admin",
+        },
+      });
+    }
 
     publishDonationEvent(req, "donation.assignment.updated", donacion);
     return res.status(200).json({

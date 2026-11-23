@@ -101,10 +101,22 @@ const notifyCollectorOfAutomaticAssignment = async (donacion, collectorId) => {
   }
 };
 
-const notifyDonationStatusChange = async (donacion, previousStatus, nextStatus) => {
+const notifyDonationStatusChange = async (
+  donacion,
+  previousStatus,
+  nextStatus,
+  changedBy = null
+) => {
   if (!donacion?._id || previousStatus === nextStatus) return;
   try {
     const admins = await Admin.find({ status: { $ne: false } }).select("_id").lean();
+    const fullName = (person) =>
+      `${person?.nombre || ""} ${person?.apellido || ""}`.trim();
+    const donorName = fullName(donacion.donante)
+      || String(donacion.nombreDonante || "").trim();
+    const collectorName = fullName(donacion.recolector);
+    const campaignName = String(donacion.campana?.nombre || "");
+    const changedByName = fullName(changedBy);
     const recipients = [
       ...(donacion.donante
         ? [{ userId: donacion.donante._id || donacion.donante, role: "donante" }]
@@ -130,6 +142,15 @@ const notifyDonationStatusChange = async (donacion, previousStatus, nextStatus) 
         previousState: previousStatus,
         status: nextStatus,
         estado: nextStatus,
+        newStatus: nextStatus,
+        donorId: String(donacion.donante?._id || donacion.donante || ""),
+        donorName,
+        collectorId: String(donacion.recolector?._id || donacion.recolector || ""),
+        collectorName,
+        campaignName,
+        changedById: String(changedBy?._id || ""),
+        changedByName,
+        changedByRole: String(changedBy?.rol || ""),
       },
     });
   } catch (error) {
@@ -869,7 +890,8 @@ const leerDonacionQR = async (req, res) => {
       .populate("recolector", "nombre apellido telefono")
       .populate("evidencias.recolector", "nombre apellido")
       .populate("historialRecolectores.recolectorAnterior", "nombre apellido")
-      .populate("historialRecolectores.recolectorNuevo", "nombre apellido");
+      .populate("historialRecolectores.recolectorNuevo", "nombre apellido")
+      .populate("historialRecolectores.administrador", "nombre apellido");
 
     if (!donacion) {
       return res.status(404).json({ msg: "Donación no encontrada" });
@@ -926,6 +948,25 @@ const leerDonacionQR = async (req, res) => {
     const historialEstados = sortDonationHistory(donacion.historialEstados);
     const historialEstadosConResponsable =
       await serializeDonationStatusHistory(historialEstados);
+    const historialRecolectores = sortDonationHistory(donacion.historialRecolectores)
+      .map((entry) => {
+        const previousCollector = entry.recolectorAnterior;
+        const newCollector = entry.recolectorNuevo;
+        const administrator = entry.administrador;
+        const person = (value) => value?._id
+          ? {
+              id: String(value._id),
+              fullName: `${value.nombre || ""} ${value.apellido || ""}`.trim(),
+            }
+          : null;
+        return {
+          ...entry.toObject(),
+          changedAt: entry.fecha,
+          previousCollector: person(previousCollector),
+          newCollector: person(newCollector),
+          changedBy: person(administrator),
+        };
+      });
     const entregaGeneral = campaign?._id
       ? await EntregaCampana.findOne({ campana: campaign._id })
         .select("_id campana receptor nombresReceptor apellidosReceptor telefonoReceptor cargoReceptor descripcionBienes fechaEntrega responsablesCampana evidencias estado createdAt updatedAt")
@@ -960,7 +1001,7 @@ const leerDonacionQR = async (req, res) => {
           : null,
       },
       historialEstados: historialEstadosConResponsable,
-        historialRecolectores: sortDonationHistory(donacion.historialRecolectores),
+        historialRecolectores,
     });
   } catch (error) {
     console.error("Error al consultar donación por QR:", error);
@@ -1126,7 +1167,7 @@ const cambiarEstadoRecolector = (estadoActual, estadoNuevo, extras = () => ({}))
         return res.status(409).json({ msg: "La donación cambió mientras se procesaba la acción" });
       }
       publishDonationEvent(req, "donation.status.updated", donacion);
-      void notifyDonationStatusChange(donacion, estadoActual, estadoNuevo);
+      void notifyDonationStatusChange(donacion, estadoActual, estadoNuevo, user);
       return res.status(200).json({ donacion });
     } catch (error) {
       console.error(error);
@@ -1341,7 +1382,7 @@ const cambiarEstadoRecolectorConEvidencias = ({
 
     uploadedImages = [];
     publishDonationEvent(req, "donation.status.updated", donacion);
-    void notifyDonationStatusChange(donacion, estadoActual, estadoNuevo);
+    void notifyDonationStatusChange(donacion, estadoActual, estadoNuevo, user);
     return res.status(200).json({
       donacion,
       evidencias: donacion.evidencias,
@@ -1501,7 +1542,12 @@ const marcarRecolectada = async (req, res) => {
 
     uploadedImages = [];
     publishDonationEvent(req, "donation.status.updated", donacion);
-    void notifyDonationStatusChange(donacion, "pendiente_recoleccion", "recolectada");
+    void notifyDonationStatusChange(
+      donacion,
+      "pendiente_recoleccion",
+      "recolectada",
+      user
+    );
     return res.status(200).json({
       donacion,
       evidencias: donacion.evidencias,
@@ -1627,7 +1673,7 @@ const marcarClasificada = async (req, res) => {
       });
     }
     publishDonationEvent(req, "donation.status.updated", donacion);
-    void notifyDonationStatusChange(donacion, "recolectada", "en_entrega");
+    void notifyDonationStatusChange(donacion, "recolectada", "en_entrega", user);
     const classifiedDonations = await Donacion.find({
       campana: actual.campana,
       puntoRecoleccionRef: actual.puntoRecoleccionRef,
@@ -1868,7 +1914,7 @@ const marcarEntregada = async (req, res) => {
 
     uploadedImage = null;
     publishDonationEvent(req, "donation.status.updated", updated);
-    void notifyDonationStatusChange(updated, "en_entrega", "entregada");
+    void notifyDonationStatusChange(updated, "en_entrega", "entregada", user);
     return res.status(200).json({ donacion: updated, duplicada: false });
   } catch (error) {
     if (uploadedImage?.imagenPublicId) {
@@ -1961,7 +2007,7 @@ const actualizarEstado = async (req, res) => {
     donacion.estado = estadoFinal;
     await donacion.save();
     if (previousStatus !== estadoFinal) {
-      void notifyDonationStatusChange(donacion, previousStatus, estadoFinal);
+      void notifyDonationStatusChange(donacion, previousStatus, estadoFinal, req.user);
     }
 
     return res.status(200).json(donacion);

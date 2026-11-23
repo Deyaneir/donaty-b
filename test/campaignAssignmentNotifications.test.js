@@ -80,6 +80,15 @@ test("assignment notification payload carries the campaign, point, roster and re
     principalId,
     principalNombre: "Ana",
     principalApellido: "Paz",
+    collectorId: supportId,
+    collectorName: "Luis Sol",
+    previousCollectorId: "",
+    previousCollectorName: "",
+    newCollectorId: supportId,
+    newCollectorName: "Luis Sol",
+    changedById: "",
+    changedByName: "",
+    changedByRole: "",
     recolectores: JSON.stringify([
       {
         _id: supportId,

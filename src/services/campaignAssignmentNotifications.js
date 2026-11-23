@@ -1,4 +1,5 @@
 import Recolector from "../models/Recolector.js";
+import Admin from "../models/Admin.js";
 import { notifyUsers } from "./firebase_notifications.js";
 
 const collectorIdsForPoint = (point) => [...new Set([
@@ -49,7 +50,8 @@ const buildAssignmentNotification = (
   campaign,
   change,
   collectorsById,
-  eventPrefix = "campaign-assignment"
+  eventPrefix = "campaign-assignment",
+  adminsById = new Map()
 ) => {
   const assignment = change.current || change.previous;
   const point = assignment.point;
@@ -79,6 +81,19 @@ const buildAssignmentNotification = (
     ? String(assignedHistory._id)
     : String(campaign.__v ?? campaign.updatedAt?.getTime?.() ?? Date.now());
   const recipientRole = change.current?.rolPunto || "retirado";
+  const changedById = String(
+    assignedHistory?.administrador?._id
+    ?? assignedHistory?.administrador
+    ?? ""
+  );
+  const changedBy = adminsById.get(changedById);
+  const previousCollectorId = String(
+    assignedHistory?.recolectorAnterior?._id
+    ?? assignedHistory?.recolectorAnterior
+    ?? ""
+  );
+  const previousCollector = collectorsById.get(previousCollectorId);
+  const collector = collectorsById.get(change.collectorId);
 
   return {
     eventKey: `${eventPrefix}:${campaign._id}:${eventId}:${change.collectorId}:${recipientRole}`,
@@ -100,6 +115,17 @@ const buildAssignmentNotification = (
       principalId,
       principalNombre: String(principal?.nombre ?? ""),
       principalApellido: String(principal?.apellido ?? ""),
+      collectorId: change.collectorId,
+      collectorName: `${collector?.nombre || ""} ${collector?.apellido || ""}`.trim(),
+      previousCollectorId,
+      previousCollectorName: `${previousCollector?.nombre || ""} ${previousCollector?.apellido || ""}`.trim(),
+      newCollectorId: change.current ? change.collectorId : "",
+      newCollectorName: change.current
+        ? `${collector?.nombre || ""} ${collector?.apellido || ""}`.trim()
+        : "",
+      changedById,
+      changedByName: `${changedBy?.nombre || ""} ${changedBy?.apellido || ""}`.trim(),
+      changedByRole: changedById ? "admin" : "",
       recolectores: JSON.stringify(pointRoster),
       rolPunto: recipientRole,
     },
@@ -129,12 +155,26 @@ const notifyCampaignAssignmentChanges = async (
     const collectorsById = new Map(
       collectors.map((collector) => [String(collector._id), collector])
     );
+    const administratorIds = [...new Set(
+      (campaign.historialAsignacionesRecolectores || [])
+        .map((entry) => String(entry?.administrador?._id ?? entry?.administrador ?? ""))
+        .filter(Boolean)
+    )];
+    const administrators = administratorIds.length
+      ? await Admin.find({ _id: { $in: administratorIds } })
+        .select("_id nombre apellido")
+        .lean()
+      : [];
+    const adminsById = new Map(
+      administrators.map((admin) => [String(admin._id), admin])
+    );
     return await Promise.all(changes.map(async (change) => {
       const notification = buildAssignmentNotification(
         campaign,
         change,
         collectorsById,
-        eventPrefix
+        eventPrefix,
+        adminsById
       );
       const result = await notifyUsers(notification);
       return { recolectorId: change.collectorId, estado: result.status };

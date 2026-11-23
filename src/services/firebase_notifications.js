@@ -113,7 +113,7 @@ const notifyUsers = async ({
         persisted.push(notification);
       } catch (error) {
         if (error?.code === 11000) continue;
-        console.error("Error persistiendo notificación:", error.message || error);
+        throw error;
       }
     }
     if (!persisted.length) return { status: "duplicate" };

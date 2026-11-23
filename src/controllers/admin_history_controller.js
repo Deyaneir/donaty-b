@@ -1106,16 +1106,57 @@ const listDonationTrace = async (req, res) => {
         .lean()
       : [];
     const collectorsById = new Map(collectors.map((item) => [String(item._id), item]));
+    const administratorIds = [...new Set(
+      (donation.historialRecolectores || [])
+        .map((entry) => String(entry.administrador || ""))
+        .filter(Boolean)
+    )];
+    const administrators = administratorIds.length
+      ? await Admin.find({ _id: { $in: administratorIds } })
+        .select("_id nombre apellido")
+        .lean()
+      : [];
+    const administratorsById = new Map(
+      administrators.map((item) => [String(item._id), item])
+    );
     const historialRecolectores = (donation.historialRecolectores || [])
-      .map((entry) => ({
-        ...entry,
-        recolectorAnteriorDetalle: entry.recolectorAnterior
+      .map((entry) => {
+        const previousCollector = entry.recolectorAnterior
           ? collectorsById.get(String(entry.recolectorAnterior)) ?? null
-          : null,
-        recolectorNuevoDetalle: entry.recolectorNuevo
+          : null;
+        const newCollector = entry.recolectorNuevo
           ? collectorsById.get(String(entry.recolectorNuevo)) ?? null
-          : null,
-      }))
+          : null;
+        const administrator = entry.administrador
+          ? administratorsById.get(String(entry.administrador)) ?? null
+          : null;
+        return {
+          ...entry,
+          changedAt: entry.fecha,
+          previousCollector: previousCollector
+            ? {
+                id: String(previousCollector._id),
+                fullName: `${previousCollector.nombre || ""} ${previousCollector.apellido || ""}`.trim(),
+              }
+            : null,
+          newCollector: newCollector
+            ? {
+                id: String(newCollector._id),
+                fullName: `${newCollector.nombre || ""} ${newCollector.apellido || ""}`.trim(),
+              }
+            : null,
+          changedBy: administrator
+            ? {
+                id: String(administrator._id),
+                fullName: `${administrator.nombre || ""} ${administrator.apellido || ""}`.trim(),
+              }
+            : entry.administrador
+              ? { id: String(entry.administrador), fullName: "" }
+              : null,
+          recolectorAnteriorDetalle: previousCollector,
+          recolectorNuevoDetalle: newCollector,
+        };
+      })
       .sort((left, right) => new Date(left.fecha) - new Date(right.fecha));
     const delivery = donation.campana
       ? await EntregaCampana.findOne({
