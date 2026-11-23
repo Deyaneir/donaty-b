@@ -1,7 +1,6 @@
 import { Router } from "express";
 import auth from "../middlewares/JWT.js";
 import requireRole from "../middlewares/requireRole.js";
-import rejectClosedCampaignMutation from "../middlewares/rejectClosedCampaignMutation.js";
 
 import {
   listarDonacionesAdmin,
@@ -18,7 +17,6 @@ router.get("/admin/lista", listarDonacionesAdmin);
 router.get("/admin/recolectores", listarRecolectoresAsignables);
 router.patch(
   "/:id/admin-asignar",
-  rejectClosedCampaignMutation("donation"),
   asignarDonacionAdmin
 );
 

@@ -259,7 +259,7 @@ const asignarDonacionAdmin = async (req, res) => {
         estado: "asignada",
         fechaAsignacion,
       };
-    } else if (["asignada", "pendiente_recoleccion", "recolectada"].includes(actual.estado)) {
+    } else {
       if (String(actual.recolector) === String(recolector._id)) {
         return res.status(409).json({
           msg: `La donación ya está asignada a ${nombreCompleto(recolector)}. Elige otro recolector.`,
@@ -268,13 +268,6 @@ const asignarDonacionAdmin = async (req, res) => {
       filtro = { _id: id, tipo: "fisica", estado: actual.estado };
       cambios = { recolector: recolector._id, fechaAsignacion };
       reasignacion = true;
-    } else {
-      return res.status(409).json({
-        msg:
-          `No se puede asignar esta donación porque está en estado "${etiqueta(actual.estado)}". ` +
-          "Solo se asigna cuando está pendiente y se reasigna antes de finalizar " +
-          "la actividad pendiente.",
-      });
     }
 
     // El filtro por estado hace el cambio atómico: si otro proceso cambió la
@@ -349,14 +342,22 @@ const asignarDonacionAdmin = async (req, res) => {
       }
     }
 
+    const reassignmentRecipients = [
+      { userId: recolector._id, role: "recolector" },
+      ...(donacion.donante?._id
+        ? [{ userId: donacion.donante._id, role: "donante" }]
+        : []),
+    ];
     void notifyUsers({
-      eventKey: `donation-assigned:${donacion._id}:${recolector._id}`,
-      recipients: [{ userId: recolector._id, role: "recolector" }],
-      title: "Nueva donación asignada",
-      body: `Código ${donacion._id}: revisa los detalles de la donación.`,
+      eventKey: `donation-${reasignacion ? "reassigned" : "assigned"}:${donacion._id}:${recolector._id}:${fechaAsignacion.getTime()}`,
+      recipients: reassignmentRecipients,
+      title: reasignacion ? "Donación reasignada" : "Nueva donación asignada",
+      body: reasignacion
+        ? `Tu donación ${donacion._id} fue reasignada a ${nombreCompleto(recolector)}.`
+        : `Código ${donacion._id}: la donación fue asignada a ${nombreCompleto(recolector)}.`,
       data: {
-        tipo: "donation_assigned",
-        type: "donation_assigned",
+        tipo: reasignacion ? "donation_reassigned" : "donation_assigned",
+        type: reasignacion ? "donation_reassigned" : "donation_assigned",
         donacionId: String(donacion._id),
         donationId: String(donacion._id),
         campanaId: String(donacion.campana?._id ?? donacion.campana ?? ""),

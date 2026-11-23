@@ -4,6 +4,7 @@ import ChatMessage from "../models/ChatMessage.js";
 import Donante from "../models/Donante.js";
 import Donacion from "../models/Donacion.js";
 import Recolector from "../models/Recolector.js";
+import NotificationEvent from "../models/NotificationEvent.js";
 import {
   canAccessRoom,
   emitToAuthorizedRoom,
@@ -17,7 +18,7 @@ const currentUser = (req) => req.user || req.donanteHeader;
 
 const rejectAccess = (res, access) => res.status(access.status).json({ msg: access.msg });
 
-const sendRoomMessage = async (user, roomId, text) => {
+const sendRoomMessage = async (user, roomId, text, idempotencyKey = "") => {
   if (isBlank(roomId) || isBlank(text)) {
     return { error: { status: 400, msg: "roomId y text son requeridos" } };
   }
@@ -28,6 +29,16 @@ const sendRoomMessage = async (user, roomId, text) => {
   const access = await canAccessRoom(user, roomId, "write");
   if (!access.ok) return { error: access };
 
+  const normalizedKey = String(idempotencyKey || "").trim().slice(0, 200);
+  if (normalizedKey) {
+    const existing = await ChatMessage.findOne({
+      room: String(roomId),
+      senderId: user._id,
+      idempotencyKey: normalizedKey,
+    });
+    if (existing) return { message: existing.toObject(), duplicada: true };
+  }
+
   const message = await ChatMessage.create({
     room: String(roomId),
     donacion: access.donacion?._id || null,
@@ -37,6 +48,7 @@ const sendRoomMessage = async (user, roomId, text) => {
     senderApellido: user.apellido || "",
     senderEmail: user.email || "",
     text: normalizedText,
+    idempotencyKey: normalizedKey,
   });
   await ChatConversation.updateOne({ room: String(roomId) }, { $set: { updatedAt: message.createdAt } });
   const recipients = (access.conversation?.participants || [])
@@ -190,6 +202,16 @@ const getRoomMessages = async (req, res) => {
       { $set: { "participants.$.lastReadAt": new Date() } },
       { timestamps: false }
     );
+    await NotificationEvent.updateMany(
+      {
+        recipientId: user._id,
+        recipientRole: String(user.rol || "").toLowerCase(),
+        type: "message",
+        conversationId: String(roomId),
+        readAt: null,
+      },
+      { $set: { readAt: new Date() } }
+    );
     return res.status(200).json({ items: items.reverse() });
   } catch (error) {
     console.error(error);
@@ -199,7 +221,15 @@ const getRoomMessages = async (req, res) => {
 
 const postRoomMessage = async (req, res) => {
   try {
-    const result = await sendRoomMessage(currentUser(req), req.params.roomId, req.body?.text);
+    const idempotencyKey = req.get?.("Idempotency-Key")
+      || req.body?.idempotencyKey
+      || "";
+    const result = await sendRoomMessage(
+      currentUser(req),
+      req.params.roomId,
+      req.body?.text,
+      idempotencyKey
+    );
     if (result.error) return res.status(result.error.status).json({ msg: result.error.msg });
     await emitToAuthorizedRoom(req.app.get("io"), req.params.roomId, "message", result.message);
     return res.status(201).json({ message: result.message });

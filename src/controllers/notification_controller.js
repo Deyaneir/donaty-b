@@ -1,5 +1,6 @@
 import FcmDevice from "../models/FcmDevice.js";
 import CollectorLocationEvent from "../models/CollectorLocationEvent.js";
+import NotificationEvent from "../models/NotificationEvent.js";
 
 const VALID_ROLES = new Set(["donante", "recolector", "admin"]);
 const VALID_PLATFORMS = new Set(["android", "ios", "web"]);
@@ -71,8 +72,113 @@ const listarEventosUbicacionRecolectores = async (req, res) => {
   }
 };
 
+const notificationOwnerFilter = (req) => {
+  const user = req.user || req.donanteHeader;
+  return {
+    recipientId: user._id,
+    recipientRole: String(user.rol || "").toLowerCase(),
+  };
+};
+
+const listarNotificaciones = async (req, res) => {
+  try {
+    const owner = notificationOwnerFilter(req);
+    const limit = Math.min(Math.max(parseInt(req.query?.limit, 10) || 50, 1), 200);
+    const items = await NotificationEvent.find(owner)
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+    const unreadCount = await NotificationEvent.countDocuments({
+      ...owner,
+      readAt: null,
+    });
+    return res.status(200).json({
+      items,
+      noLeidas: unreadCount,
+      unreadCount,
+    });
+  } catch (error) {
+    console.error("Error consultando notificaciones:", error.message || error);
+    return res.status(500).json({ msg: "No se pudieron consultar las notificaciones" });
+  }
+};
+
+const contarNotificacionesNoLeidas = async (req, res) => {
+  try {
+    const owner = notificationOwnerFilter(req);
+    const unreadCount = await NotificationEvent.countDocuments({
+      ...owner,
+      readAt: null,
+    });
+    return res.status(200).json({
+      noLeidas: unreadCount,
+      unreadCount,
+    });
+  } catch (error) {
+    console.error("Error contando notificaciones:", error.message || error);
+    return res.status(500).json({ msg: "No se pudo contar las notificaciones" });
+  }
+};
+
+const marcarNotificacionLeida = async (req, res) => {
+  try {
+    const owner = notificationOwnerFilter(req);
+    const now = new Date();
+    const notification = await NotificationEvent.findOneAndUpdate(
+      { _id: req.params.id, ...owner, readAt: null },
+      { $set: { readAt: now } },
+      { new: true }
+    );
+    if (!notification) {
+      const exists = await NotificationEvent.exists({ _id: req.params.id, ...owner });
+      if (!exists) return res.status(404).json({ msg: "Notificación no encontrada" });
+    }
+    const unreadCount = await NotificationEvent.countDocuments({
+      ...owner,
+      readAt: null,
+    });
+    return res.status(200).json({
+      notificacion: notification,
+      noLeidas: unreadCount,
+      unreadCount,
+    });
+  } catch (error) {
+    console.error("Error marcando notificación como leída:", error.message || error);
+    return res.status(500).json({ msg: "No se pudo actualizar la notificación" });
+  }
+};
+
+const marcarTodasLeidas = async (req, res) => {
+  try {
+    const owner = notificationOwnerFilter(req);
+    await NotificationEvent.updateMany(
+      { ...owner, readAt: null },
+      { $set: { readAt: new Date() } }
+    );
+    if (req.body?.conversationId) {
+      await NotificationEvent.updateMany(
+        {
+          ...owner,
+          type: "message",
+          conversationId: String(req.body.conversationId),
+          readAt: null,
+        },
+        { $set: { readAt: new Date() } }
+      );
+    }
+    return res.status(200).json({ noLeidas: 0, unreadCount: 0 });
+  } catch (error) {
+    console.error("Error marcando notificaciones como leídas:", error.message || error);
+    return res.status(500).json({ msg: "No se pudieron actualizar las notificaciones" });
+  }
+};
+
 export {
+  contarNotificacionesNoLeidas,
   deactivateDevice,
   listarEventosUbicacionRecolectores,
+  listarNotificaciones,
+  marcarNotificacionLeida,
+  marcarTodasLeidas,
   registerDevice,
 };

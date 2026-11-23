@@ -10,6 +10,7 @@ const chatMessageSchema = new Schema(
     senderApellido: { type: String, default: "", trim: true },
     senderEmail: { type: String, default: "", trim: true },
     text: { type: String, required: true, trim: true },
+    idempotencyKey: { type: String, default: "", trim: true, index: true },
   },
   { timestamps: true }
 );

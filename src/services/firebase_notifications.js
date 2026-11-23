@@ -39,16 +39,6 @@ const normalizeRecipients = (recipients) =>
       ])
   ).values()];
 
-const claimEvent = async (eventKey) => {
-  try {
-    await NotificationEvent.create({ eventKey });
-    return true;
-  } catch (error) {
-    if (error?.code === 11000) return false;
-    throw error;
-  }
-};
-
 const sendBatch = async (messaging, tokens, notification, data) => {
   const response = await messaging.sendEachForMulticast({
     tokens,
@@ -88,11 +78,52 @@ const notifyUsers = async ({
   data = {},
 }) => {
   if (!eventKey) return { status: "invalid_event" };
-  if (!firebaseApp) return { status: "disabled" };
 
   try {
     const normalizedRecipients = normalizeRecipients(recipients);
     if (!normalizedRecipients.length) return { status: "no_recipients" };
+
+    const persisted = [];
+    for (const recipient of normalizedRecipients) {
+      try {
+        const notification = await NotificationEvent.findOneAndUpdate(
+          {
+            eventKey,
+            recipientId: recipient.userId,
+            recipientRole: recipient.role,
+          },
+          {
+            $setOnInsert: {
+              eventKey,
+              recipientId: recipient.userId,
+              recipientRole: recipient.role,
+              type: String(data.type || data.tipo || "notification"),
+              title,
+              body,
+              donationId: data.donationId || data.donacionId || null,
+              campaignId: data.campaignId || data.campanaId || null,
+              conversationId: String(data.roomId || data.conversationId || ""),
+              data,
+              readAt: null,
+              pushStatus: "pending",
+            },
+          },
+          { upsert: true, new: true, setDefaultsOnInsert: true }
+        );
+        persisted.push(notification);
+      } catch (error) {
+        if (error?.code === 11000) continue;
+        console.error("Error persistiendo notificación:", error.message || error);
+      }
+    }
+    if (!persisted.length) return { status: "duplicate" };
+    if (!firebaseApp) {
+      await NotificationEvent.updateMany(
+        { _id: { $in: persisted.map((item) => item._id) } },
+        { $set: { pushStatus: "disabled" } }
+      );
+      return { status: "disabled", persisted: persisted.length };
+    }
 
     const deviceFilter = {
       active: true,
@@ -100,8 +131,13 @@ const notifyUsers = async ({
     };
     const devices = await FcmDevice.find(deviceFilter).select("token").lean();
     const tokens = devices.map((device) => device.token).filter(Boolean);
-    if (!tokens.length) return { status: "no_devices" };
-    if (!(await claimEvent(eventKey))) return { status: "duplicate" };
+    if (!tokens.length) {
+      await NotificationEvent.updateMany(
+        { _id: { $in: persisted.map((item) => item._id) } },
+        { $set: { pushStatus: "no_devices" } }
+      );
+      return { status: "no_devices", persisted: persisted.length };
+    }
 
     const messaging = getMessaging(firebaseApp);
     const safeData = Object.fromEntries(
@@ -119,8 +155,23 @@ const notifyUsers = async ({
       successCount += result.successCount;
       failureCount += result.failureCount;
     }
+    const pushStatus = failureCount === 0
+      ? "sent"
+      : successCount === 0
+        ? "failed"
+        : "partial_failure";
+    await NotificationEvent.updateMany(
+      { _id: { $in: persisted.map((item) => item._id) } },
+      {
+        $set: {
+          pushStatus,
+          ...(failureCount === 0 ? { pushSentAt: new Date() } : {}),
+        },
+      }
+    );
     return {
-      status: failureCount === 0 ? "sent" : successCount === 0 ? "failed" : "partial_failure",
+      status: pushStatus,
+      persisted: persisted.length,
       successCount,
       failureCount,
     };
