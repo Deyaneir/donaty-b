@@ -146,6 +146,7 @@ test("donation QR returns the assigned collector's current real location without
     );
 
     assert.equal(response.statusCode, 200);
+    assert.equal(String(response.body.donacion.campana._id), ids.campaign);
     assert.deepEqual(response.body.donacion.ubicacionRecoleccion, {
       latitude: -0.210145,
       longitude: -78.488712,

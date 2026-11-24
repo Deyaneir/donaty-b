@@ -72,7 +72,7 @@ router.get(
 router.get(
   "/:campanaId/entrega",
   auth,
-  requireRole("admin", "recolector"),
+  requireRole("admin", "recolector", "donante"),
   consultarEntregaGeneral
 );
 router.post(

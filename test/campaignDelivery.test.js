@@ -19,6 +19,7 @@ import {
 import { consultarEntregaGeneral } from "../src/controllers/entrega_campana_controller.js";
 import { listarCampanasAdmin } from "../src/controllers/campana_admin_controller.js";
 import { marcarEntregada } from "../src/controllers/donacion_controller.js";
+import campaignRouter from "../src/routers/campana_routes.js";
 
 const campaign = {
   _id: "campaign-1",
@@ -621,10 +622,14 @@ test("classification records are unique per campaign, point, and normalized name
 
 test("delivery read endpoint returns the full record to its principal and admins", async () => {
   const originalFindOne = EntregaCampana.findOne;
+  const originalDonationExists = Donacion.exists;
   const delivery = {
     _id: "delivery-1",
     campana: { _id: "campaign-1", nombre: "Campaña de invierno" },
     receptor: "Centro de acogida",
+    nombresReceptor: "Nombre",
+    apellidosReceptor: "Ficticio",
+    fechaEntrega: new Date("2026-11-23T12:00:00.000Z"),
     recibeIdentificacion: "1234567890",
     recibeInstitucion: "Centro de acogida",
     observacion: "Entrega recibida conforme",
@@ -633,6 +638,7 @@ test("delivery read endpoint returns the full record to its principal and admins
       nombre: "Ana",
       apellido: "Recolectora",
     },
+    donaciones: [{ donacion: "donation-1" }],
     clasificaciones: [{
       clasificacionId: "classification-1",
       nombre: "Alimentos",
@@ -659,6 +665,14 @@ test("delivery read endpoint returns the full record to its principal and admins
     },
     lean: async () => delivery,
   });
+  Donacion.exists = async (filter) => {
+    assert.deepEqual(filter, {
+      _id: { $in: ["donation-1"] },
+      campana: "507f1f77bcf86cd799439012",
+      donante: "donor-1",
+    });
+    return { _id: "donation-1" };
+  };
   const response = responseStub();
   const campaignId = "507f1f77bcf86cd799439012";
 
@@ -671,6 +685,8 @@ test("delivery read endpoint returns the full record to its principal and admins
     assert.equal(response.body.entrega.entregadoPor, "Ana Recolectora");
     assert.equal(response.body.entrega.recibeIdentificacion, "1234567890");
     assert.equal(response.body.entrega.recibeInstitucion, "Centro de acogida");
+    assert.equal(response.body.entrega.recibeNombre, "Nombre Ficticio");
+    assert.equal(response.body.entrega.fecha.toISOString(), "2026-11-23T12:00:00.000Z");
     assert.equal(response.body.entrega.observacion, "Entrega recibida conforme");
     assert.deepEqual(response.body.campana, {
       id: "campaign-1",
@@ -697,9 +713,48 @@ test("delivery read endpoint returns the full record to its principal and admins
       forbiddenResponse
     );
     assert.equal(forbiddenResponse.statusCode, 403);
+
+    const donorResponse = responseStub();
+    await consultarEntregaGeneral({
+      user: { _id: "donor-1", rol: "donante" },
+      params: { campanaId: campaignId },
+    }, donorResponse);
+    assert.equal(donorResponse.statusCode, 200);
+    assert.deepEqual(donorResponse.body.entregaGeneral, {
+      recibeNombre: "Nombre Ficticio",
+      recibeIdentificacion: "1234567890",
+      recibeInstitucion: "Centro de acogida",
+      fecha: new Date("2026-11-23T12:00:00.000Z"),
+      fechaEntrega: new Date("2026-11-23T12:00:00.000Z"),
+      observacion: "Entrega recibida conforme",
+      entregadoPor: "Ana Recolectora",
+    });
+    assert.deepEqual(donorResponse.body.campana, {
+      id: "campaign-1",
+      nombre: "Campaña de invierno",
+    });
+
+    Donacion.exists = async () => null;
+    const unrelatedDonorResponse = responseStub();
+    await consultarEntregaGeneral({
+      user: { _id: "donor-2", rol: "donante" },
+      params: { campanaId: campaignId },
+    }, unrelatedDonorResponse);
+    assert.equal(unrelatedDonorResponse.statusCode, 403);
   } finally {
     EntregaCampana.findOne = originalFindOne;
+    Donacion.exists = originalDonationExists;
   }
+});
+
+test("campaign delivery GET route allows donors to reach the ownership-checked controller", () => {
+  const deliveryRoute = campaignRouter.stack.find(
+    (layer) => layer.route?.path === "/:campanaId/entrega"
+      && layer.route.methods.get
+  );
+  assert.ok(deliveryRoute);
+  assert.equal(deliveryRoute.route.stack.at(-1).name, "consultarEntregaGeneral");
+  assert.equal(deliveryRoute.route.stack.length, 3);
 });
 
 test("admin campaign list exposes whether a general delivery is registered", async () => {

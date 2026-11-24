@@ -2,6 +2,7 @@ import mongoose from "mongoose";
 import { unlink } from "node:fs/promises";
 import { uploadImage, deleteImage } from "../helpers/cloudinaryImages.js";
 import Campana from "../models/Campana.js";
+import Donacion from "../models/Donacion.js";
 import EntregaCampana from "../models/EntregaCampana.js";
 import {
   createCampaignDelivery,
@@ -19,12 +20,17 @@ const serializeCampaignDelivery = (delivery) => {
     : { ...delivery };
   const principal = record.recolectorPrincipal;
   const campaign = record.campana;
+  const receiverName = [
+    record.nombresReceptor,
+    record.apellidosReceptor,
+  ].map((part) => String(part ?? "").trim()).filter(Boolean).join(" ");
   return {
     entrega: {
-      recibeNombre: record.receptor || "",
+      recibeNombre: receiverName || record.receptor || "",
       recibeIdentificacion: record.recibeIdentificacion || "",
       recibeInstitucion: record.recibeInstitucion || "",
       fecha: record.fechaEntrega || null,
+      fechaEntrega: record.fechaEntrega || null,
       observacion: record.observacion || "",
       entregadoPor: [
         record.recolectorPrincipalNombre || principal?.nombre || "",
@@ -68,8 +74,32 @@ const consultarEntregaGeneral = async (req, res) => {
         msg: "La entrega general de esta campaña aún no ha sido registrada",
       });
     }
+    const role = String(user.rol || "").toLowerCase();
+    if (role === "donante") {
+      const donationIds = (delivery.donaciones || [])
+        .map((entry) => entry.donacion?._id ?? entry.donacion)
+        .filter(Boolean);
+      const ownsDonation = donationIds.length
+        ? await Donacion.exists({
+            _id: { $in: donationIds },
+            campana: campaignId,
+            donante: user._id,
+          })
+        : false;
+      if (!ownsDonation) {
+        return res.status(403).json({
+          msg: "Solo puedes consultar la entrega de una campaña a la que pertenece una de tus donaciones",
+        });
+      }
+      const serialized = serializeCampaignDelivery(delivery);
+      return res.status(200).json({
+        entregaGeneral: serialized.entrega,
+        campana: serialized.campana,
+      });
+    }
+
     if (
-      String(user.rol || "").toLowerCase() !== "admin"
+      role !== "admin"
       && String(delivery.recolectorPrincipal?._id ?? delivery.recolectorPrincipal)
         !== String(user._id)
     ) {

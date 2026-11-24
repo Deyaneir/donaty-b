@@ -280,6 +280,7 @@ test("donor donation history retains all statuses and populated campaign covers"
     assert.ok(response.body.items.every(
       (item) => item.campana.imagenUrl === "https://images.example.test/campaign.jpg"
     ));
+    assert.equal(String(response.body.items[0].campana._id), campaignId);
     assert.equal(response.body.items[0].estadoLabel, "Asignada");
     assert.deepEqual(response.body.items[0].evidencias[0], {
       etapa: "recepcion",
