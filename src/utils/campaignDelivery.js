@@ -25,8 +25,19 @@ const serializeCampaignDeliveryForDonor = (delivery, campaignId = null) => {
       cargo: person.cargo,
     })),
     evidencias: (delivery.evidencias || []).map((evidence) => ({
+      ...(evidence._id ? { id: String(evidence._id) } : {}),
+      etapa: "entrega",
       imagenUrl: urlPublica(evidence.imagenUrl),
-      fecha: evidence.fecha,
+      fecha: evidence.fecha ?? null,
+      recolector: {
+        id: delivery.recolectorPrincipal?._id
+          ? String(delivery.recolectorPrincipal._id)
+          : delivery.recolectorPrincipal
+            ? String(delivery.recolectorPrincipal)
+            : null,
+        nombre: delivery.recolectorPrincipalNombre || null,
+        apellido: delivery.recolectorPrincipalApellido || null,
+      },
     })),
     estado: delivery.estado,
     createdAt: delivery.createdAt,

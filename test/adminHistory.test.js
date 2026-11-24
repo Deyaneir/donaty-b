@@ -341,13 +341,39 @@ test("donor campaign donation cards include classification, pickup point and del
     estado: "entregada",
     puntoRecoleccionRef: pointId,
     clasificacionId: { _id: "class-id", nombre: "Ropa" },
-    entregas: [{ fecha: new Date("2025-02-01T10:00:00Z") }],
+    evidencias: [{
+      etapa: "recepcion",
+      recolector: {
+        _id: "collector-id",
+        nombre: "Recolector",
+        apellido: "Ejemplo",
+      },
+      imagenUrl: "https://images.example.test/pickup-proof.jpg",
+      fecha: new Date("2025-02-01T09:00:00Z"),
+    }],
+    entregas: [{
+      _id: "individual-delivery-id",
+      fecha: new Date("2025-02-01T10:00:00Z"),
+      recolector: {
+        _id: "collector-id",
+        nombre: "Recolector",
+        apellido: "Ejemplo",
+      },
+      imagenUrl: "https://images.example.test/individual-delivery.jpg",
+    }],
   }]);
   EntregaCampana.findOne = () => queryFor({
     campana: campaignId,
     receptor: "Fundación",
     fechaEntrega: new Date("2025-02-02T10:00:00Z"),
     donaciones: [{ donacion: donationId, estado: "entregada" }],
+    recolectorPrincipal: "collector-id",
+    recolectorPrincipalNombre: "Recolector",
+    recolectorPrincipalApellido: "Ejemplo",
+    evidencias: [{
+      imagenUrl: "https://images.example.test/campaign-delivery.jpg",
+      fecha: new Date("2025-02-02T10:00:00Z"),
+    }],
   });
   const res = response();
 
@@ -365,9 +391,19 @@ test("donor campaign donation cards include classification, pickup point and del
   assert.equal(res.body.items[0].clasificacion.nombre, "Ropa");
   assert.equal(res.body.items[0].entrega.general.receptor, "Fundación");
   assert.equal(res.body.items[0].entrega.individual.length, 1);
+  assert.equal(res.body.items[0].evidencias[0].etapa, "recepcion");
+  assert.equal(res.body.items[0].evidencias[0].recolector.nombre, "Recolector");
+  assert.equal(
+    res.body.items[0].entrega.individual[0].evidencias[0].etapa,
+    "finalizacion"
+  );
+  assert.equal(
+    res.body.items[0].entrega.general.evidencias[0].recolector.nombre,
+    "Recolector"
+  );
 });
 
-test("donation trace includes only recorded status events and exposes previous and next states", async (t) => {
+test("donation trace includes evidence, delivery photos, and recorded status transitions", async (t) => {
   const originalFindById = Donacion.findById;
   const originalDeliveryFind = EntregaCampana.findOne;
   const originalRecolectorFind = Recolector.find;
@@ -377,19 +413,60 @@ test("donation trace includes only recorded status events and exposes previous a
     Recolector.find = originalRecolectorFind;
   });
   const donationId = "672a3c4d5e6f708192a3c4c3";
+  const campaignId = "672a3c4d5e6f708192a3c4c4";
+  const collectorId = "672a3c4d5e6f708192a3c4c5";
   Donacion.findById = () => queryFor({
     _id: donationId,
     tipo: "fisica",
     estado: "recolectada",
+    campana: { _id: campaignId, puntosRecoleccion: [] },
     historialEstados: [
       { estado: "asignada", fecha: new Date("2025-01-01T10:00:00Z") },
       { estado: "recolectada", fecha: new Date("2025-01-02T10:00:00Z") },
     ],
     historialRecolectores: [],
-    entregas: [],
-    campana: null,
+    evidencias: [{
+      _id: "evidence-id",
+      etapa: "recepcion",
+      recolector: {
+        _id: collectorId,
+        nombre: "Recolector",
+        apellido: "Ejemplo",
+      },
+      imagenUrl: "https://images.example.test/pickup-proof.jpg",
+      fecha: new Date("2025-01-01T09:00:00Z"),
+    }],
+    entregas: [{
+      _id: "individual-delivery-id",
+      nombresReceptor: "Persona",
+      apellidosReceptor: "Receptora",
+      telefonoReceptor: "0000000000",
+      cargoReceptor: "Responsable",
+      descripcionBienes: "Bienes entregados",
+      recolector: {
+        _id: collectorId,
+        nombre: "Recolector",
+        apellido: "Ejemplo",
+      },
+      imagenUrl: "https://images.example.test/individual-delivery.jpg",
+      fecha: new Date("2025-01-02T10:00:00Z"),
+    }],
   });
-  EntregaCampana.findOne = () => queryFor(null);
+  EntregaCampana.findOne = () => queryFor({
+    campana: campaignId,
+    receptor: "Institución ficticia",
+    fechaEntrega: new Date("2025-01-03T10:00:00Z"),
+    descripcionBienes: "Entrega de la campaña",
+    estado: "entregada",
+    recolectorPrincipal: collectorId,
+    recolectorPrincipalNombre: "Recolector",
+    recolectorPrincipalApellido: "Ejemplo",
+    donaciones: [{ donacion: donationId, estado: "entregada" }],
+    evidencias: [{
+      imagenUrl: "https://images.example.test/campaign-delivery.jpg",
+      fecha: new Date("2025-01-03T10:00:00Z"),
+    }],
+  });
   Recolector.find = () => queryFor([]);
   const res = response();
 
@@ -401,4 +478,16 @@ test("donation trace includes only recorded status events and exposes previous a
   assert.equal(res.body.historialEstados[0].estadoNuevo, "asignada");
   assert.equal(res.body.historialEstados[1].estadoAnterior, "asignada");
   assert.equal(res.body.historialEstados[1].estadoNuevo, "recolectada");
+  assert.equal(res.body.donacion.evidencias[0].id, "evidence-id");
+  assert.equal(res.body.donacion.evidencias[0].etapa, "recepcion");
+  assert.equal(res.body.donacion.evidencias[0].recolector.nombre, "Recolector");
+  assert.equal(res.body.donacion.entrega.individual[0].id, "individual-delivery-id");
+  assert.equal(
+    res.body.donacion.entrega.individual[0].evidencias[0].imagenUrl,
+    "https://images.example.test/individual-delivery.jpg"
+  );
+  assert.equal(
+    res.body.donacion.entrega.general.evidencias[0].etapa,
+    "entrega"
+  );
 });

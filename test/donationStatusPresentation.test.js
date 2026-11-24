@@ -26,8 +26,10 @@ test("donor campaign delivery returns persisted evidence with publicly accessibl
 
     assert.equal(delivery.registrada, true);
     assert.deepEqual(delivery.evidencias, [{
+      etapa: "entrega",
       imagenUrl: "https://images.example.test/delivery-photo.jpg",
       fecha: new Date("2026-11-23T12:00:00.000Z"),
+      recolector: { id: null, nombre: null, apellido: null },
     }]);
   } finally {
     if (previousBaseUrl === undefined) delete process.env.PUBLIC_BASE_URL;

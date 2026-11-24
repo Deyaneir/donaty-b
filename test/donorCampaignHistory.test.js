@@ -164,21 +164,65 @@ test("donor can query inactive categories and subcategories from a donated campa
 test("donor donation history retains all statuses and populated campaign covers", async () => {
   const originalDonationFind = Donacion.find;
   const originalDeliveryFind = EntregaCampana.find;
+  const originalCollectorFind = Recolector.find;
   let donationFilter;
-  const items = ["asignada", "entregada", "cancelada"].map((estado, index) => ({
-    campana: {
-      _id: campaignId,
-      imagenUrl: "https://images.example.test/campaign.jpg",
-    },
-    toObject: () => ({
+  const items = ["asignada", "entregada", "cancelada"].map((estado, index) => {
+    const donation = {
       _id: `donation-${index}`,
       estado,
+      evidencias: index === 0 ? [{
+        etapa: "recepcion",
+        recolector: {
+          _id: "672a3c4d5e6f708192a3c4c4",
+          nombre: "Recolector",
+          apellido: "Ejemplo",
+        },
+        imagenUrl: "https://images.example.test/pickup-proof.jpg",
+        fecha: new Date("2026-11-23T11:00:00.000Z"),
+      }] : [],
+      entregas: index === 0 ? [{
+        _id: "672a3c4d5e6f708192a3c4c5",
+        recolector: {
+          _id: "672a3c4d5e6f708192a3c4c4",
+          nombre: "Recolector",
+          apellido: "Ejemplo",
+        },
+        imagenUrl: "https://images.example.test/individual-delivery.jpg",
+        fecha: new Date("2026-11-23T12:00:00.000Z"),
+      }] : [],
+      historialEstados: index === 0 ? [{
+        estado: "recolectada",
+        responsable: "672a3c4d5e6f708192a3c4c4",
+        rolResponsable: "recolector",
+        fecha: new Date("2026-11-23T11:30:00.000Z"),
+        observaciones: "Recolección confirmada",
+      }] : [],
+      historialRecolectores: index === 0 ? [{
+        fecha: new Date("2026-11-23T10:30:00.000Z"),
+        motivo: "Cambio de turno",
+        recolectorAnterior: {
+          _id: "672a3c4d5e6f708192a3c4c6",
+          nombre: "Recolector",
+          apellido: "Anterior",
+        },
+        recolectorNuevo: {
+          _id: "672a3c4d5e6f708192a3c4c4",
+          nombre: "Recolector",
+          apellido: "Ejemplo",
+        },
+        administrador: {
+          _id: "672a3c4d5e6f708192a3c4c7",
+          nombre: "Admin",
+          apellido: "Ejemplo",
+        },
+      }] : [],
       campana: {
         _id: campaignId,
         imagenUrl: "https://images.example.test/campaign.jpg",
       },
-    }),
-  }));
+    };
+    return { campana: donation.campana, ...donation, toObject: () => donation };
+  });
   const deliveryEvidence = {
     imagenUrl: "https://images.example.test/delivery-proof.jpg",
     fecha: new Date("2026-11-23T12:00:00.000Z"),
@@ -207,6 +251,16 @@ test("donor donation history retains all statuses and populated campaign covers"
       donaciones: [{ donacion: "donation-0" }],
     }],
   });
+  Recolector.find = () => ({
+    select() {
+      return this;
+    },
+    lean: async () => [{
+      _id: "672a3c4d5e6f708192a3c4c4",
+      nombre: "Recolector",
+      apellido: "Ejemplo",
+    }],
+  });
   const response = makeResponse();
   try {
     await listarMisDonaciones({ user: { _id: donorId } }, response);
@@ -220,13 +274,72 @@ test("donor donation history retains all statuses and populated campaign covers"
       (item) => item.campana.imagenUrl === "https://images.example.test/campaign.jpg"
     ));
     assert.equal(response.body.items[0].estadoLabel, "Asignada");
+    assert.deepEqual(response.body.items[0].evidencias[0], {
+      etapa: "recepcion",
+      imagenUrl: "https://images.example.test/pickup-proof.jpg",
+      fecha: new Date("2026-11-23T11:00:00.000Z"),
+      recolector: {
+        id: "672a3c4d5e6f708192a3c4c4",
+        nombre: "Recolector",
+        apellido: "Ejemplo",
+      },
+    });
+    assert.equal(response.body.items[0].entregas[0].id, "672a3c4d5e6f708192a3c4c5");
+    assert.equal(response.body.items[0].entregas[0].etapa, "finalizacion");
+    assert.equal(
+      response.body.items[0].entregas[0].recolector.nombre,
+      "Recolector"
+    );
+    assert.equal(
+      response.body.items[0].historialEstados[0].estado,
+      "recolectada"
+    );
+    assert.equal(
+      response.body.items[0].historialEstados[0].observaciones,
+      "Recolección confirmada"
+    );
+    assert.equal(
+      response.body.items[0].historialEstados[0].responsableDetalle.nombre,
+      "Recolector"
+    );
+    assert.deepEqual(
+      response.body.items[0].historialRecolectores[0].previousCollector,
+      {
+        id: "672a3c4d5e6f708192a3c4c6",
+        fullName: "Recolector Anterior",
+      }
+    );
+    assert.deepEqual(
+      response.body.items[0].historialRecolectores[0].newCollector,
+      {
+        id: "672a3c4d5e6f708192a3c4c4",
+        fullName: "Recolector Ejemplo",
+      }
+    );
+    assert.deepEqual(
+      response.body.items[0].historialRecolectores[0].changedBy,
+      {
+        id: "672a3c4d5e6f708192a3c4c7",
+        fullName: "Admin Ejemplo",
+      }
+    );
     assert.deepEqual(
       response.body.items[0].entregaGeneralCampana.evidencias,
-      [deliveryEvidence]
+      [{
+        etapa: "entrega",
+        imagenUrl: "https://images.example.test/delivery-proof.jpg",
+        fecha: deliveryEvidence.fecha,
+        recolector: { id: null, nombre: null, apellido: null },
+      }]
+    );
+    assert.deepEqual(
+      response.body.items[1].entregaGeneralCampana.registrada,
+      false
     );
   } finally {
     Donacion.find = originalDonationFind;
     EntregaCampana.find = originalDeliveryFind;
+    Recolector.find = originalCollectorFind;
   }
 });
 });

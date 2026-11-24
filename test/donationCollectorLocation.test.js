@@ -155,8 +155,24 @@ test("donation QR returns the assigned collector's current real location without
       "https://images.example.test/individual-delivery.jpg"
     );
     assert.equal(
+      response.body.evidenciasPorEtapa.finalizacion[0].fotografias[0].etapa,
+      "finalizacion"
+    );
+    assert.equal(
+      response.body.evidenciasPorEtapa.finalizacion[0].fotografias[0].recolector.id,
+      ids.collector
+    );
+    assert.equal(
+      response.body.evidenciasPorEtapa.finalizacion[0].fotografias[0].recolector.nombre,
+      null
+    );
+    assert.equal(
       response.body.entregaGeneralCampana.evidencias[0].imagenUrl,
       "https://images.example.test/campaign-delivery.jpg"
+    );
+    assert.equal(
+      response.body.entregaGeneralCampana.evidencias[0].etapa,
+      "entrega"
     );
     assert.equal(
       response.body.ubicacionResponsable.actualizadoEn.toISOString(),

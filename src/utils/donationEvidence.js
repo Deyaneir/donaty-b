@@ -10,24 +10,37 @@ const serializeDonationEvidence = (evidences = []) => {
     const stage = String(evidence.etapa ?? "");
     if (!Object.hasOwn(grouped, stage)) continue;
     const collector = evidence.recolector;
-    const collectorId = String(collector?._id ?? collector ?? "");
+    const collectorId = collector?._id
+      ? String(collector._id)
+      : collector && typeof collector !== "object"
+        ? String(collector)
+        : "";
     const groupKey = `${stage}:${collectorId}`;
     let group = collectorGroups.get(groupKey);
     if (!group) {
       group = {
         responsable: {
-          nombre: collector?.nombre ?? "",
-          apellido: collector?.apellido ?? "",
+          id: collectorId || null,
+          nombre: collector?.nombre ?? null,
+          apellido: collector?.apellido ?? null,
         },
         fotografias: [],
       };
       collectorGroups.set(groupKey, group);
       grouped[stage].push(group);
     }
-    group.fotografias.push({
+    const photo = {
+      ...(evidence._id ? { id: String(evidence._id) } : {}),
+      etapa: stage,
       imagenUrl: urlPublica(evidence.imagenUrl),
-      fecha: evidence.fecha,
-    });
+      fecha: evidence.fecha ?? null,
+      recolector: {
+        id: collectorId || null,
+        nombre: collector?.nombre ?? null,
+        apellido: collector?.apellido ?? null,
+      },
+    };
+    group.fotografias.push(photo);
   }
 
   return grouped;

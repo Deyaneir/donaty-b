@@ -151,11 +151,44 @@ El guard geográfico sigue aplicándose a las operaciones de recolector que requ
 ## Consulta de trazabilidad QR
 
 - `POST /api/donacion/qr` — administrador, donante autenticado o recolector autenticado.
+- `GET /api/donacion/:id` — usa la misma respuesta y las mismas reglas de autorización que la consulta QR.
 - Cuerpo: `{ "codigo": "DONATY:DONACION_ID" }`.
 - Un donante solo consulta sus propias donaciones; un recolector solo las que tiene asignadas; el administrador puede consultar cualquiera. El acceso no autorizado responde `403`.
-- Respuesta `200`: `donacion`, `entregaGeneralCampana`, `puntoRecoleccion`, `recolectoresAsignadosAlPunto`, `responsableVigente`, `ubicacionResponsable`, `historialEstados`, `historialRecolectores` y `evidenciasPorEtapa`. Las evidencias se agrupan por etapa y responsable: cada grupo contiene `responsable: { nombre, apellido }` y `fotografias: [{ imagenUrl, fecha }]`; no se devuelve el ID del recolector ni el ID interno de la foto.
+- Respuesta `200`: `donacion`, `entregaGeneralCampana`, `puntoRecoleccion`, `recolectoresAsignadosAlPunto`, `responsableVigente`, `ubicacionResponsable`, `historialEstados`, `historialRecolectores` y `evidenciasPorEtapa`. Cada fotografía de `evidenciasPorEtapa` incluye la etapa, URL pública, fecha y recolector que la registró. Los IDs se conservan en campos separados; no se usan como sustituto de nombres faltantes. Se incluye un ID de evidencia solo si ese registro ya tiene uno.
 - El QR existente usa `DONATY:` seguido del `_id` original; el detalle devuelve ese identificador y no crea códigos nuevos.
-- `GET /api/donacion/mis` también agrega `entregaGeneralCampana` a cada donación del donante. Antes de registrar la entrega, devuelve `registrada: false` y un mensaje controlado. Cuando existe, devuelve receptor, fecha, responsables/cargos y URLs persistentes de evidencias, pero nunca el inventario consolidado ni la trazabilidad de otros donantes.
+- `GET /api/donacion/mis` filtra por el ID del donante autenticado y agrega evidencias, historiales y `entregaGeneralCampana` a cada donación propia. Antes de registrar la entrega general, devuelve `registrada: false`; cuando existe, devuelve receptor, fecha, responsables/cargos y evidencias persistentes. La evidencia general se incluye solo si el registro de entrega vincula explícitamente esa donación; no se mezcla con las evidencias individuales.
+- Los historiales de estado conservan `estado` técnico e incluyen `estadoLabel`, fecha, observación y responsable con rol/nombre cuando está disponible. Las reasignaciones conservan los datos registrados y añaden `changedAt`, `previousCollector`, `newCollector` y `changedBy`; `fullName` queda `null` si no existe un nombre persistido.
+- Ejemplo anonimizado de evidencia individual en `GET /api/donacion/mis`:
+
+```json
+{
+  "etapa": "recepcion",
+  "imagenUrl": "https://api.example.test/uploads/evidencia.jpg",
+  "fecha": "2026-11-23T12:00:00.000Z",
+  "recolector": {
+    "id": "recolector-ejemplo",
+    "nombre": "Nombre",
+    "apellido": "de ejemplo"
+  }
+}
+```
+
+- Ejemplo anonimizado de evidencia de entrega general, en `entregaGeneralCampana.evidencias`:
+
+```json
+{
+  "etapa": "entrega",
+  "imagenUrl": "https://api.example.test/uploads/entrega.jpg",
+  "fecha": "2026-11-23T12:30:00.000Z",
+  "recolector": {
+    "id": "recolector-ejemplo",
+    "nombre": "Nombre",
+    "apellido": "de ejemplo"
+  }
+}
+```
+
+- `GET /api/admin/historial/donaciones/:donacionId/trazabilidad` — solo administrador; devuelve la tarjeta de la donación, evidencias, datos de entrega y los historiales de estado y reasignación. En la evidencia individual, `id` aparece solo si existe; los registros de evidencia de los modelos actuales no generan IDs artificiales.
 - `puntoRecoleccion` incluye identificador, nombre, edificio, piso, aula, dirección y referencias existentes en el punto.
 - Los historiales se devuelven cronológicamente. El historial de estados comienza con las transiciones registradas desde esta versión; los registros históricos no se reconstruyen ni se inventan.
 - `ubicacionResponsable` informa `estado`, `coordenadas` y `actualizadoEn`. Coordenadas se devuelven solo cuando la ubicación corresponde a la campaña y punto de la donación y tiene menos de 5 minutos.

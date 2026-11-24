@@ -743,7 +743,12 @@ const listarMisDonaciones = async (req, res) => {
         "campana",
         "nombre activa estado imagenUrl fechaInicio fechaFin periodoAcademico"
       )
-      .populate("recolector", "nombre apellido");
+      .populate("recolector", "nombre apellido")
+      .populate("evidencias.recolector", "_id nombre apellido")
+      .populate("entregas.recolector", "_id nombre apellido")
+      .populate("historialRecolectores.recolectorAnterior", "nombre apellido")
+      .populate("historialRecolectores.recolectorNuevo", "nombre apellido")
+      .populate("historialRecolectores.administrador", "nombre apellido");
     const campaignIds = [...new Set(
       items
         .map((item) => item.campana?._id)
@@ -752,36 +757,70 @@ const listarMisDonaciones = async (req, res) => {
     )];
     const deliveries = campaignIds.length
       ? await EntregaCampana.find({ campana: { $in: campaignIds } })
-        .select("_id campana receptor nombresReceptor apellidosReceptor telefonoReceptor cargoReceptor descripcionBienes fechaEntrega responsablesCampana evidencias donaciones estado createdAt updatedAt")
+        .select("_id campana receptor nombresReceptor apellidosReceptor telefonoReceptor cargoReceptor descripcionBienes fechaEntrega responsablesCampana recolectorPrincipal recolectorPrincipalNombre recolectorPrincipalApellido evidencias donaciones estado createdAt updatedAt")
         .lean()
       : [];
     const deliveryByCampaign = new Map(
       deliveries.map((delivery) => [String(delivery.campana), delivery])
     );
+    const serializedItems = await Promise.all(items.map(async (item) => {
+      const donation = item.toObject();
+      const campaignDelivery = deliveryByCampaign.get(String(item.campana?._id || ""));
+      const donationHasDelivery = campaignDelivery?.donaciones?.some(
+        (entry) => String(entry.donacion?._id ?? entry.donacion) === String(donation._id)
+      );
+      const historialEstados = await serializeDonationStatusHistory(
+        sortDonationHistory(item.historialEstados)
+      );
+      return {
+        ...donation,
+        estadoLabel: donationStatusLabel(donation.estado),
+        evidencias: (donation.evidencias || []).map((evidence) => ({
+          ...(evidence._id ? { id: String(evidence._id) } : {}),
+          etapa: evidence.etapa,
+          imagenUrl: urlPublica(evidence.imagenUrl),
+          fecha: evidence.fecha ?? null,
+          recolector: evidence.recolector?._id
+            ? {
+                id: String(evidence.recolector._id),
+                nombre: evidence.recolector.nombre || null,
+                apellido: evidence.recolector.apellido || null,
+              }
+            : {
+                id: evidence.recolector ? String(evidence.recolector) : null,
+                nombre: null,
+                apellido: null,
+              },
+        })),
+        entregas: (donation.entregas || []).map((delivery) => ({
+          ...delivery,
+          ...(delivery._id ? { id: String(delivery._id) } : {}),
+          etapa: "finalizacion",
+          imagenUrl: urlPublica(delivery.imagenUrl),
+          recolector: delivery.recolector?._id
+            ? {
+                id: String(delivery.recolector._id),
+                nombre: delivery.recolector.nombre || null,
+                apellido: delivery.recolector.apellido || null,
+              }
+            : {
+                id: delivery.recolector ? String(delivery.recolector) : null,
+                nombre: null,
+                apellido: null,
+              },
+        })),
+        historialEstados,
+        historialRecolectores: serializeDonationReassignmentHistory(
+          sortDonationHistory(item.historialRecolectores)
+        ),
+        entregaGeneralCampana: serializeCampaignDeliveryForDonor(
+          donationHasDelivery ? campaignDelivery : null,
+          donationHasDelivery ? item.campana?._id || null : null
+        ),
+      };
+    }));
     return res.status(200).json({
-      items: items.map((item) => {
-        const donation = item.toObject();
-        const campaignDelivery = deliveryByCampaign.get(String(item.campana?._id || ""));
-        const donationHasDelivery = campaignDelivery?.donaciones?.some(
-          (entry) => String(entry.donacion?._id ?? entry.donacion) === String(donation._id)
-        );
-        return {
-          ...donation,
-          estadoLabel: donationStatusLabel(donation.estado),
-          evidencias: (donation.evidencias || []).map((evidence) => ({
-            ...evidence,
-            imagenUrl: urlPublica(evidence.imagenUrl),
-          })),
-          entregas: (donation.entregas || []).map((delivery) => ({
-            ...delivery,
-            imagenUrl: urlPublica(delivery.imagenUrl),
-          })),
-          entregaGeneralCampana: serializeCampaignDeliveryForDonor(
-            donationHasDelivery ? campaignDelivery : null,
-            donationHasDelivery ? item.campana?._id || null : null
-          ),
-        };
-      }),
+      items: serializedItems,
     });
   } catch (error) {
     console.error(error);
@@ -905,6 +944,26 @@ const serializeDonationStatusHistory = async (entries = []) => {
   });
 };
 
+const serializeDonationReassignmentHistory = (entries = []) =>
+  entries.map((entry) => {
+    const item = typeof entry.toObject === "function" ? entry.toObject() : { ...entry };
+    const person = (value) => {
+      if (!value) return null;
+      const id = value._id ? String(value._id) : String(value);
+      const fullName = value._id
+        ? `${value.nombre || ""} ${value.apellido || ""}`.trim() || null
+        : null;
+      return { id, fullName };
+    };
+    return {
+      ...item,
+      changedAt: item.fecha,
+      previousCollector: person(item.recolectorAnterior),
+      newCollector: person(item.recolectorNuevo),
+      changedBy: person(item.administrador),
+    };
+  });
+
 const leerDonacionQR = async (req, res) => {
   try {
     const user = req.user || req.donanteHeader;
@@ -927,6 +986,7 @@ const leerDonacionQR = async (req, res) => {
       .populate("donante", "nombre apellido telefono")
       .populate("recolector", "nombre apellido telefono")
       .populate("evidencias.recolector", "nombre apellido")
+      .populate("entregas.recolector", "nombre apellido")
       .populate("historialRecolectores.recolectorAnterior", "nombre apellido")
       .populate("historialRecolectores.recolectorNuevo", "nombre apellido")
       .populate("historialRecolectores.administrador", "nombre apellido");
@@ -984,38 +1044,35 @@ const leerDonacionQR = async (req, res) => {
     donacionPayload.imagenUrl = urlPublica(donacionPayload.imagenUrl);
     donacionPayload.entregas = (donacionPayload.entregas || []).map((delivery) => ({
       ...delivery,
+      ...(delivery._id ? { id: String(delivery._id) } : {}),
+      etapa: "finalizacion",
       imagenUrl: urlPublica(delivery.imagenUrl),
+      recolector: delivery.recolector?._id
+        ? {
+            id: String(delivery.recolector._id),
+            nombre: delivery.recolector.nombre || null,
+            apellido: delivery.recolector.apellido || null,
+          }
+        : {
+            id: delivery.recolector ? String(delivery.recolector) : null,
+            nombre: null,
+            apellido: null,
+          },
     }));
     donacionPayload.estadoLabel = donationStatusLabel(donacion.estado);
     donacionPayload.evidencias = evidenciasPorEtapa;
     const historialEstados = sortDonationHistory(donacion.historialEstados);
     const historialEstadosConResponsable =
       await serializeDonationStatusHistory(historialEstados);
-    const historialRecolectores = sortDonationHistory(donacion.historialRecolectores)
-      .map((entry) => {
-        const previousCollector = entry.recolectorAnterior;
-        const newCollector = entry.recolectorNuevo;
-        const administrator = entry.administrador;
-        const person = (value) => value?._id
-          ? {
-              id: String(value._id),
-              fullName: `${value.nombre || ""} ${value.apellido || ""}`.trim(),
-            }
-          : null;
-        return {
-          ...entry.toObject(),
-          changedAt: entry.fecha,
-          previousCollector: person(previousCollector),
-          newCollector: person(newCollector),
-          changedBy: person(administrator),
-        };
-      });
+    const historialRecolectores = serializeDonationReassignmentHistory(
+      sortDonationHistory(donacion.historialRecolectores)
+    );
     const entregaGeneral = campaign?._id
       ? await EntregaCampana.findOne({
           campana: campaign._id,
           "donaciones.donacion": donacion._id,
         })
-        .select("_id campana receptor nombresReceptor apellidosReceptor telefonoReceptor cargoReceptor descripcionBienes fechaEntrega responsablesCampana evidencias estado createdAt updatedAt")
+        .select("_id campana receptor nombresReceptor apellidosReceptor telefonoReceptor cargoReceptor descripcionBienes fechaEntrega responsablesCampana recolectorPrincipal recolectorPrincipalNombre recolectorPrincipalApellido evidencias estado createdAt updatedAt")
         .lean()
       : null;
 
