@@ -98,6 +98,8 @@ const entregaSchema = new Schema(
   {
     nombresReceptor: { type: String, required: true, trim: true, maxlength: 120 },
     apellidosReceptor: { type: String, required: true, trim: true, maxlength: 120 },
+    recibeIdentificacion: { type: String, default: null, trim: true, maxlength: 40 },
+    recibeInstitucion: { type: String, default: null, trim: true, maxlength: 180 },
     telefonoReceptor: { type: String, required: true, trim: true, maxlength: 20 },
     cargoReceptor: { type: String, required: true, trim: true, maxlength: 120 },
     descripcionBienes: { type: String, required: true, trim: true, maxlength: 2000 },

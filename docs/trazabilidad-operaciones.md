@@ -157,6 +157,22 @@ El guard geográfico sigue aplicándose a las operaciones de recolector que requ
 - Respuesta `200`: `donacion`, `entregaGeneralCampana`, `puntoRecoleccion`, `recolectoresAsignadosAlPunto`, `responsableVigente`, `ubicacionResponsable`, `historialEstados`, `historialRecolectores` y `evidenciasPorEtapa`. Cada fotografía de `evidenciasPorEtapa` incluye la etapa, URL pública, fecha y recolector que la registró. Los IDs se conservan en campos separados; no se usan como sustituto de nombres faltantes. Se incluye un ID de evidencia solo si ese registro ya tiene uno.
 - El QR existente usa `DONATY:` seguido del `_id` original; el detalle devuelve ese identificador y no crea códigos nuevos.
 - `GET /api/donacion/mis` filtra por el ID del donante autenticado y agrega evidencias, historiales y `entregaGeneralCampana` a cada donación propia. Antes de registrar la entrega general, devuelve `registrada: false`; cuando existe, devuelve receptor, fecha, responsables/cargos y evidencias persistentes. La evidencia general se incluye solo si el registro de entrega vincula explícitamente esa donación; no se mezcla con las evidencias individuales.
+- Las evidencias individuales tienen la misma forma plana en `GET /api/donacion/mis`, `GET /api/donacion/:id`, `POST /api/donacion/qr` y la respuesta de `PATCH /api/donacion/:id/recolectar`: `etapa`, `imagenUrl`, `fecha` y `recolector`. `evidenciasPorEtapa` se mantiene como agrupación adicional en las respuestas que ya la ofrecen.
+- `PATCH /api/donacion/:id/recolectar` guarda las imágenes subidas como evidencia `recepcion` en la misma donación cuyo ID está en la ruta y responde con `{ donacion, evidencias, evidenciasPorEtapa, duplicada }`. Acepta fotos en `evidencias`, `imagenes` o `imagen`; `etapa`, si se envía, debe ser `recepcion`. La URL guardada se devuelve como `imagenUrl` pública; la respuesta no expone el ID privado del proveedor de imágenes ni la clave idempotente.
+- El historial del donante, el detalle/QR y la trazabilidad administrativa presentan la entrega individual en `entregas`; además exponen `entrega` como alias del registro más reciente cuando existe. `recibeNombre` se compone de los nombres y apellidos ya guardados. `recibeIdentificacion` y `recibeInstitucion` son opcionales, se guardan en la entrega individual si se envían a `PATCH /api/donacion/:id/entregar` y responden `null` si no fueron registrados. `fechaEntrega` es un alias de `fecha`. Los datos de `entregaGeneralCampana` se mantienen separados y no completan campos de una entrega individual.
+- `PATCH /api/donacion/:id/entregar` conserva el contrato existente para nombres (`nombresReceptor`, `apellidosReceptor`), teléfono, cargo, descripción, foto e idempotencia; también acepta opcionalmente `recibeIdentificacion` (máximo 40 caracteres) y `recibeInstitucion` (máximo 180). El servidor persiste estos campos en el registro individual de `Donacion.entregas`.
+- Ejemplo anonimizado de los campos añadidos para una entrega individual:
+
+```json
+{
+  "recibeNombre": "Nombre Ficticio",
+  "recibeIdentificacion": "ID-FICTICIO",
+  "recibeInstitucion": "Institución ficticia",
+  "fecha": "2026-11-23T12:00:00.000Z",
+  "fechaEntrega": "2026-11-23T12:00:00.000Z",
+  "imagenUrl": "https://api.example.test/uploads/entrega.jpg"
+}
+```
 - Los historiales de estado conservan `estado` técnico e incluyen `estadoLabel`, fecha, observación y responsable con rol/nombre cuando está disponible. Las reasignaciones conservan los datos registrados y añaden `changedAt`, `previousCollector`, `newCollector` y `changedBy`; `fullName` queda `null` si no existe un nombre persistido.
 - Ejemplo anonimizado de evidencia individual en `GET /api/donacion/mis`:
 
@@ -195,7 +211,7 @@ El guard geográfico sigue aplicándose a las operaciones de recolector que requ
 
 ## Evidencias fotográficas
 
-- `PATCH /api/donacion/:id/recolectar` — solo recolector asignado. `multipart/form-data` con una o varias fotos en `imagen`, `imagenes` o `evidencias`. La transición a `recolectada` se guarda junto con todas las evidencias; si alguna carga o persistencia falla, no cambia el estado.
+- `PATCH /api/donacion/:id/recolectar` — solo recolector asignado. `multipart/form-data` con una o varias fotos en `imagen`, `imagenes` o `evidencias`, `etapa=recepcion` (opcional por compatibilidad) y `Idempotency-Key` o `idempotencyKey`. La transición a `recolectada` se guarda junto con todas las evidencias; si alguna carga o persistencia falla, no cambia el estado.
 - `POST /api/donacion/:id/evidencias` — solo recolector asignado. `multipart/form-data` con `etapa` (`recepcion`, `finalizacion` o `devolucion`) y de una a dos fotos en `imagen`, `imagenes` o `evidencias`.
 - Clave obligatoria: `Idempotency-Key` (encabezado) o `idempotencyKey` (campo de formulario), máximo 128 caracteres.
 - La etapa debe ser compatible con el estado actual: recepción (`pendiente_recoleccion` o `recolectada`), finalización (`entregada`) o devolución (`devolucion` o `devuelta`). La asignación y el estado se vuelven a comprobar al guardar.

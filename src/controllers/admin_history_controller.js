@@ -577,6 +577,12 @@ const serializeIndividualDeliveries = (deliveries = []) => deliveries.map((deliv
     ...(delivery._id ? { id: String(delivery._id) } : {}),
     nombresReceptor: delivery.nombresReceptor,
     apellidosReceptor: delivery.apellidosReceptor,
+    recibeNombre: [
+      delivery.nombresReceptor,
+      delivery.apellidosReceptor,
+    ].map((part) => String(part ?? "").trim()).filter(Boolean).join(" ") || null,
+    recibeIdentificacion: delivery.recibeIdentificacion || null,
+    recibeInstitucion: delivery.recibeInstitucion || null,
     telefonoReceptor: delivery.telefonoReceptor,
     cargoReceptor: delivery.cargoReceptor,
     descripcionBienes: delivery.descripcionBienes,
@@ -586,6 +592,7 @@ const serializeIndividualDeliveries = (deliveries = []) => deliveries.map((deliv
       apellido: collector?.apellido || null,
     },
     fecha: delivery.fecha,
+    fechaEntrega: delivery.fecha ?? null,
     imagenUrl: urlPublica(delivery.imagenUrl),
     evidencias: evidence,
   };

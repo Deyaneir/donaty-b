@@ -182,6 +182,13 @@ test("donor donation history retains all statuses and populated campaign covers"
       }] : [],
       entregas: index === 0 ? [{
         _id: "672a3c4d5e6f708192a3c4c5",
+        nombresReceptor: "Nombre",
+        apellidosReceptor: "Ficticio",
+        recibeIdentificacion: "ID-FICTICIO",
+        recibeInstitucion: "Institución ficticia",
+        telefonoReceptor: "0000000000",
+        cargoReceptor: "Responsable",
+        descripcionBienes: "Bienes de ejemplo",
         recolector: {
           _id: "672a3c4d5e6f708192a3c4c4",
           nombre: "Recolector",
@@ -286,6 +293,17 @@ test("donor donation history retains all statuses and populated campaign covers"
     });
     assert.equal(response.body.items[0].entregas[0].id, "672a3c4d5e6f708192a3c4c5");
     assert.equal(response.body.items[0].entregas[0].etapa, "finalizacion");
+    assert.equal(response.body.items[0].entregas[0].recibeNombre, "Nombre Ficticio");
+    assert.equal(response.body.items[0].entregas[0].recibeIdentificacion, "ID-FICTICIO");
+    assert.equal(response.body.items[0].entregas[0].recibeInstitucion, "Institución ficticia");
+    assert.equal(
+      response.body.items[0].entregas[0].fechaEntrega.toISOString(),
+      "2026-11-23T12:00:00.000Z"
+    );
+    assert.equal(
+      response.body.items[0].entrega.recibeNombre,
+      response.body.items[0].entregas[0].recibeNombre
+    );
     assert.equal(
       response.body.items[0].entregas[0].recolector.nombre,
       "Recolector"

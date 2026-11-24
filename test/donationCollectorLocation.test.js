@@ -41,7 +41,21 @@ test("donation QR returns the assigned collector's current real location without
       buildingName: "Facultad de Ingeniería",
     },
     evidencias: [{
-      etapa: "finalizacion",
+      etapa: "recepcion",
+      recolector: ids.collector,
+      fecha: capturedAt,
+      imagenUrl: "https://images.example.test/pickup-proof.jpg",
+      imagenPublicId: "pickup-proof",
+      idempotencyKey: "pickup-once",
+    }],
+    entregas: [{
+      nombresReceptor: "Nombre",
+      apellidosReceptor: "Ficticio",
+      recibeIdentificacion: "ID-FICTICIO",
+      recibeInstitucion: "Institución ficticia",
+      telefonoReceptor: "0000000000",
+      cargoReceptor: "Responsable",
+      descripcionBienes: "Bienes de ejemplo",
       recolector: ids.collector,
       fecha: receivedAt,
       imagenUrl: "https://images.example.test/individual-delivery.jpg",
@@ -151,21 +165,30 @@ test("donation QR returns the assigned collector's current real location without
       ids.donation
     );
     assert.equal(
-      response.body.evidenciasPorEtapa.finalizacion[0].fotografias[0].imagenUrl,
-      "https://images.example.test/individual-delivery.jpg"
+      response.body.evidencias[0].imagenUrl,
+      "https://images.example.test/pickup-proof.jpg"
     );
     assert.equal(
-      response.body.evidenciasPorEtapa.finalizacion[0].fotografias[0].etapa,
-      "finalizacion"
+      response.body.evidencias[0].etapa,
+      "recepcion"
     );
     assert.equal(
-      response.body.evidenciasPorEtapa.finalizacion[0].fotografias[0].recolector.id,
+      response.body.evidencias[0].recolector.id,
       ids.collector
     );
     assert.equal(
-      response.body.evidenciasPorEtapa.finalizacion[0].fotografias[0].recolector.nombre,
-      null
+      response.body.donacion.evidencias[0].imagenUrl,
+      "https://images.example.test/pickup-proof.jpg"
     );
+    assert.equal(
+      response.body.evidenciasPorEtapa.recepcion[0].fotografias[0].imagenUrl,
+      "https://images.example.test/pickup-proof.jpg"
+    );
+    assert.equal(response.body.entrega.recibeNombre, "Nombre Ficticio");
+    assert.equal(response.body.entrega.recibeIdentificacion, "ID-FICTICIO");
+    assert.equal(response.body.entrega.recibeInstitucion, "Institución ficticia");
+    assert.equal(response.body.entrega.fechaEntrega.toISOString(), receivedAt.toISOString());
+    assert.equal(response.body.donacion.entregas[0].imagenUrl, "https://images.example.test/individual-delivery.jpg");
     assert.equal(
       response.body.entregaGeneralCampana.evidencias[0].imagenUrl,
       "https://images.example.test/campaign-delivery.jpg"

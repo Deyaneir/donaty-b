@@ -45,4 +45,65 @@ const serializeCampaignDeliveryForDonor = (delivery, campaignId = null) => {
   };
 };
 
-export { serializeCampaignDeliveryForDonor };
+const serializeIndividualDonationDelivery = (delivery) => {
+  const receiverName = [
+    delivery.nombresReceptor,
+    delivery.apellidosReceptor,
+  ]
+    .map((part) => String(part ?? "").trim())
+    .filter(Boolean)
+    .join(" ");
+  const collector = delivery.recolector;
+  const collectorId = collector?._id
+    ? String(collector._id)
+    : collector && typeof collector !== "object"
+      ? String(collector)
+      : null;
+  return {
+    ...delivery,
+    ...(delivery._id ? { id: String(delivery._id) } : {}),
+    recibeNombre: receiverName || null,
+    recibeIdentificacion: delivery.recibeIdentificacion || null,
+    recibeInstitucion: delivery.recibeInstitucion || null,
+    fechaEntrega: delivery.fecha ?? null,
+    etapa: "finalizacion",
+    imagenUrl: urlPublica(delivery.imagenUrl),
+    recolector: {
+      id: collectorId,
+      nombre: collector?.nombre ?? null,
+      apellido: collector?.apellido ?? null,
+    },
+  };
+};
+
+const createIndividualDonationDeliveryRecord = ({
+  nombresReceptor,
+  apellidosReceptor,
+  recibeIdentificacion,
+  recibeInstitucion,
+  telefonoReceptor,
+  cargoReceptor,
+  descripcionBienes,
+  recolector,
+  fecha,
+  imagen,
+  idempotencyKey,
+}) => ({
+  nombresReceptor,
+  apellidosReceptor,
+  recibeIdentificacion: recibeIdentificacion || null,
+  recibeInstitucion: recibeInstitucion || null,
+  telefonoReceptor,
+  cargoReceptor,
+  descripcionBienes,
+  recolector,
+  fecha,
+  ...imagen,
+  idempotencyKey,
+});
+
+export {
+  createIndividualDonationDeliveryRecord,
+  serializeCampaignDeliveryForDonor,
+  serializeIndividualDonationDelivery,
+};

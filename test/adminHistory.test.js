@@ -353,6 +353,13 @@ test("donor campaign donation cards include classification, pickup point and del
     }],
     entregas: [{
       _id: "individual-delivery-id",
+      nombresReceptor: "Nombre",
+      apellidosReceptor: "Ficticio",
+      recibeIdentificacion: "ID-FICTICIO",
+      recibeInstitucion: "Institución ficticia",
+      telefonoReceptor: "0000000000",
+      cargoReceptor: "Responsable",
+      descripcionBienes: "Bienes de ejemplo",
       fecha: new Date("2025-02-01T10:00:00Z"),
       recolector: {
         _id: "collector-id",
@@ -396,6 +403,22 @@ test("donor campaign donation cards include classification, pickup point and del
   assert.equal(
     res.body.items[0].entrega.individual[0].evidencias[0].etapa,
     "finalizacion"
+  );
+  assert.equal(
+    res.body.items[0].entrega.individual[0].recibeNombre,
+    "Nombre Ficticio"
+  );
+  assert.equal(
+    res.body.items[0].entrega.individual[0].recibeIdentificacion,
+    "ID-FICTICIO"
+  );
+  assert.equal(
+    res.body.items[0].entrega.individual[0].recibeInstitucion,
+    "Institución ficticia"
+  );
+  assert.equal(
+    res.body.items[0].entrega.individual[0].fechaEntrega.toISOString(),
+    "2025-02-01T10:00:00.000Z"
   );
   assert.equal(
     res.body.items[0].entrega.general.evidencias[0].recolector.nombre,

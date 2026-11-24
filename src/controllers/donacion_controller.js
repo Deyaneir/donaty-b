@@ -28,7 +28,11 @@ import {
   classifyCollectorGeofenceState,
   hasValidCollectorCoordinates,
 } from "../utils/collectorLocation.js";
-import { serializeCampaignDeliveryForDonor } from "../utils/campaignDelivery.js";
+import {
+  createIndividualDonationDeliveryRecord,
+  serializeCampaignDeliveryForDonor,
+  serializeIndividualDonationDelivery,
+} from "../utils/campaignDelivery.js";
 import { donationStatusLabel } from "../utils/donationStatus.js";
 import { isInsideEpnCampus } from "../utils/epnCampusGeofence.js";
 import {
@@ -55,7 +59,11 @@ import {
   parseExternalDonor,
 } from "../utils/collectorDonationInput.js";
 import { normalizeClassifiedProducts } from "../utils/donationClassification.js";
-import { serializeDonationEvidence } from "../utils/donationEvidence.js";
+import {
+  createDonationEvidenceRecords,
+  serializeDonationEvidence,
+  serializeDonationEvidenceRecords,
+} from "../utils/donationEvidence.js";
 import { resolveDonationClassification } from "../services/donationClassifications.js";
 import { urlPublica } from "../utils/publicUrl.js";
 
@@ -198,6 +206,29 @@ const withDonationStatusLabel = (item) => {
   return {
     ...donation,
     estadoLabel: donationStatusLabel(donation?.estado),
+  };
+};
+
+const serializeDonationResponse = (item) => {
+  const donation = typeof item?.toObject === "function" ? item.toObject() : { ...item };
+  const deliveries = (donation.entregas || []).map(serializeIndividualDonationDelivery);
+  return {
+    ...donation,
+    imagenUrl: urlPublica(donation.imagenUrl),
+    estadoLabel: donationStatusLabel(donation.estado),
+    evidencias: serializeDonationEvidenceRecords(donation.evidencias),
+    entregas: deliveries,
+    entrega: deliveries.at(-1) ?? null,
+  };
+};
+
+const serializeCollectionResponse = (donation, duplicated = false) => {
+  const serializedDonation = serializeDonationResponse(donation);
+  return {
+    donacion: serializedDonation,
+    evidencias: serializedDonation.evidencias,
+    evidenciasPorEtapa: serializeDonationEvidence(donation.evidencias),
+    duplicada: duplicated,
   };
 };
 const getCampaignDonationRegistrationError = (campaign) => {
@@ -764,7 +795,7 @@ const listarMisDonaciones = async (req, res) => {
       deliveries.map((delivery) => [String(delivery.campana), delivery])
     );
     const serializedItems = await Promise.all(items.map(async (item) => {
-      const donation = item.toObject();
+      const donation = serializeDonationResponse(item);
       const campaignDelivery = deliveryByCampaign.get(String(item.campana?._id || ""));
       const donationHasDelivery = campaignDelivery?.donaciones?.some(
         (entry) => String(entry.donacion?._id ?? entry.donacion) === String(donation._id)
@@ -774,41 +805,6 @@ const listarMisDonaciones = async (req, res) => {
       );
       return {
         ...donation,
-        estadoLabel: donationStatusLabel(donation.estado),
-        evidencias: (donation.evidencias || []).map((evidence) => ({
-          ...(evidence._id ? { id: String(evidence._id) } : {}),
-          etapa: evidence.etapa,
-          imagenUrl: urlPublica(evidence.imagenUrl),
-          fecha: evidence.fecha ?? null,
-          recolector: evidence.recolector?._id
-            ? {
-                id: String(evidence.recolector._id),
-                nombre: evidence.recolector.nombre || null,
-                apellido: evidence.recolector.apellido || null,
-              }
-            : {
-                id: evidence.recolector ? String(evidence.recolector) : null,
-                nombre: null,
-                apellido: null,
-              },
-        })),
-        entregas: (donation.entregas || []).map((delivery) => ({
-          ...delivery,
-          ...(delivery._id ? { id: String(delivery._id) } : {}),
-          etapa: "finalizacion",
-          imagenUrl: urlPublica(delivery.imagenUrl),
-          recolector: delivery.recolector?._id
-            ? {
-                id: String(delivery.recolector._id),
-                nombre: delivery.recolector.nombre || null,
-                apellido: delivery.recolector.apellido || null,
-              }
-            : {
-                id: delivery.recolector ? String(delivery.recolector) : null,
-                nombre: null,
-                apellido: null,
-              },
-        })),
         historialEstados,
         historialRecolectores: serializeDonationReassignmentHistory(
           sortDonationHistory(item.historialRecolectores)
@@ -1039,28 +1035,9 @@ const leerDonacionQR = async (req, res) => {
       && hasValidCollectorCoordinates(gps?.latitud, gps?.longitud);
     const gpsFresh =
       gpsCoordinatesAvailable && ["dentro", "fuera"].includes(locationState);
+    const evidencias = serializeDonationEvidenceRecords(donacion.evidencias);
     const evidenciasPorEtapa = serializeDonationEvidence(donacion.evidencias);
-    const donacionPayload = donacion.toObject();
-    donacionPayload.imagenUrl = urlPublica(donacionPayload.imagenUrl);
-    donacionPayload.entregas = (donacionPayload.entregas || []).map((delivery) => ({
-      ...delivery,
-      ...(delivery._id ? { id: String(delivery._id) } : {}),
-      etapa: "finalizacion",
-      imagenUrl: urlPublica(delivery.imagenUrl),
-      recolector: delivery.recolector?._id
-        ? {
-            id: String(delivery.recolector._id),
-            nombre: delivery.recolector.nombre || null,
-            apellido: delivery.recolector.apellido || null,
-          }
-        : {
-            id: delivery.recolector ? String(delivery.recolector) : null,
-            nombre: null,
-            apellido: null,
-          },
-    }));
-    donacionPayload.estadoLabel = donationStatusLabel(donacion.estado);
-    donacionPayload.evidencias = evidenciasPorEtapa;
+    const donacionPayload = serializeDonationResponse(donacion);
     const historialEstados = sortDonationHistory(donacion.historialEstados);
     const historialEstadosConResponsable =
       await serializeDonationStatusHistory(historialEstados);
@@ -1082,6 +1059,8 @@ const leerDonacionQR = async (req, res) => {
         entregaGeneral,
         campaign?._id || null
       ),
+      entrega: donacionPayload.entrega,
+      evidencias,
       evidenciasPorEtapa,
       puntoRecoleccion: serializeTracePickupPoint(point),
       recolectoresAsignadosAlPunto: pointCollectors,
@@ -1160,7 +1139,8 @@ const listarAsignadasRecolector = async (req, res) => {
       .populate("donante", "nombre apellido")
       .populate("recolector", "nombre apellido email telefono")
       .populate("registradoPorRecolector", "nombre apellido email telefono")
-      .populate("campana", "nombre activa");
+      .populate("campana", "nombre activa")
+      .populate("entregas.recolector", "_id nombre apellido");
     return res.status(200).json({ items: items.map(withDonationStatusLabel) });
   } catch (error) {
     console.error(error);
@@ -1289,19 +1269,33 @@ const buildCollectionEvidence = (req, user) => {
   const rawKey = String(req.get?.("Idempotency-Key") ?? "").trim()
     || String(req.body?.idempotencyKey ?? "").trim();
   const idempotencyKey = rawKey || `recolectada:${Date.now()}:${Math.random().toString(16).slice(2, 10)}`;
+  const etapa = String(req.body?.etapa ?? "recepcion").trim().toLowerCase();
 
   return {
     image: images.length === 1 ? images[0] : null,
     images,
+    etapa,
     idempotencyKey,
     user,
   };
 };
 
 const validateCollectionEvidence = (
-  { image, images = [], idempotencyKey },
+  { image, images = [], etapa = "recepcion", idempotencyKey },
   { allowGeneratedKey = true } = {}
 ) => {
+  if (etapa !== "recepcion") {
+    throw Object.assign(
+      new Error('La etapa debe ser "recepcion" al marcar la donación como recolectada'),
+      { statusCode: 400 }
+    );
+  }
+  if (idempotencyKey.length > 128) {
+    throw Object.assign(
+      new Error("La clave de idempotencia no puede superar 128 caracteres"),
+      { statusCode: 400 }
+    );
+  }
   if (!images.length && !image) {
     throw Object.assign(
       new Error("Debes adjuntar la evidencia fotográfica de la recolección"),
@@ -1393,12 +1387,9 @@ const cambiarEstadoRecolectorConEvidencias = ({
       const current = await Donacion.findById(id)
         .populate("recolector", "nombre apellido email telefono")
         .populate("registradoPorRecolector", "nombre apellido email telefono")
-        .populate("campana", "nombre activa");
-      return res.status(200).json({
-        donacion: current,
-        evidencias: current.evidencias,
-        duplicada: true,
-      });
+        .populate("campana", "nombre activa")
+        .populate("evidencias.recolector", "_id nombre apellido");
+      return res.status(200).json(serializeCollectionResponse(current, true));
     }
     if (actual.estado !== estadoActual) {
       return res.status(409).json({
@@ -1452,7 +1443,8 @@ const cambiarEstadoRecolectorConEvidencias = ({
     )
       .populate("recolector", "nombre apellido email telefono")
       .populate("registradoPorRecolector", "nombre apellido email telefono")
-      .populate("campana", "nombre activa");
+      .populate("campana", "nombre activa")
+      .populate("evidencias.recolector", "_id nombre apellido");
 
     if (!donacion) {
       const current = await Donacion.findById(id)
@@ -1471,12 +1463,9 @@ const cambiarEstadoRecolectorConEvidencias = ({
         const recovered = await Donacion.findById(id)
           .populate("recolector", "nombre apellido email telefono")
           .populate("registradoPorRecolector", "nombre apellido email telefono")
-          .populate("campana", "nombre activa");
-        return res.status(200).json({
-          donacion: recovered,
-          evidencias: recovered.evidencias,
-          duplicada: true,
-        });
+          .populate("campana", "nombre activa")
+          .populate("evidencias.recolector", "_id nombre apellido");
+        return res.status(200).json(serializeCollectionResponse(recovered, true));
       }
       return res.status(409).json({
         msg: "La asignación o el estado cambió; no se registró la devolución",
@@ -1573,12 +1562,9 @@ const marcarRecolectada = async (req, res) => {
       const current = await Donacion.findById(id)
         .populate("recolector", "nombre apellido email telefono")
         .populate("registradoPorRecolector", "nombre apellido email telefono")
-        .populate("campana", "nombre activa");
-      return res.status(200).json({
-        donacion: current,
-        evidencias: current.evidencias,
-        duplicada: true,
-      });
+        .populate("campana", "nombre activa")
+        .populate("evidencias.recolector", "_id nombre apellido");
+      return res.status(200).json(serializeCollectionResponse(current, true));
     }
 
     for (const image of images) {
@@ -1587,13 +1573,13 @@ const marcarRecolectada = async (req, res) => {
       );
     }
     const evidenceDate = new Date();
-    const evidence = uploadedImages.map((uploadedImage) => ({
+    const evidence = createDonationEvidenceRecords({
       etapa: "recepcion",
       recolector: user._id,
       fecha: evidenceDate,
-      ...uploadedImage,
+      imagenes: uploadedImages,
       idempotencyKey,
-    }));
+    });
 
     const donacion = await Donacion.findOneAndUpdate(
       {
@@ -1614,7 +1600,8 @@ const marcarRecolectada = async (req, res) => {
     )
       .populate("recolector", "nombre apellido email telefono")
       .populate("registradoPorRecolector", "nombre apellido email telefono")
-      .populate("campana", "nombre activa");
+      .populate("campana", "nombre activa")
+      .populate("evidencias.recolector", "_id nombre apellido");
 
     if (!donacion) {
       const current = await Donacion.findById(id).select("estado evidencias");
@@ -1629,12 +1616,9 @@ const marcarRecolectada = async (req, res) => {
         const recovered = await Donacion.findById(id)
           .populate("recolector", "nombre apellido email telefono")
           .populate("registradoPorRecolector", "nombre apellido email telefono")
-          .populate("campana", "nombre activa");
-        return res.status(200).json({
-          donacion: recovered,
-          evidencias: recovered.evidencias,
-          duplicada: true,
-        });
+          .populate("campana", "nombre activa")
+          .populate("evidencias.recolector", "_id nombre apellido");
+        return res.status(200).json(serializeCollectionResponse(recovered, true));
       }
       await Promise.all(
         uploadedImages.map((image) => deleteImage(image.imagenPublicId))
@@ -1651,10 +1635,7 @@ const marcarRecolectada = async (req, res) => {
       "recolectada",
       user
     );
-    return res.status(200).json({
-      donacion,
-      evidencias: donacion.evidencias,
-    });
+    return res.status(200).json(serializeCollectionResponse(donacion));
   } catch (error) {
     for (const image of uploadedImages) {
       try {
@@ -1873,6 +1854,8 @@ const marcarEntregada = async (req, res) => {
     const { id } = req.params;
     const nombresReceptor = String(req.body?.nombresReceptor ?? "").trim();
     const apellidosReceptor = String(req.body?.apellidosReceptor ?? "").trim();
+    const recibeIdentificacion = String(req.body?.recibeIdentificacion ?? "").trim();
+    const recibeInstitucion = String(req.body?.recibeInstitucion ?? "").trim();
     const telefonoReceptor = String(req.body?.telefonoReceptor ?? "").trim();
     const cargoReceptor = String(req.body?.cargoReceptor ?? "").trim();
     const descripcionBienes = String(req.body?.descripcionBienes ?? "").trim();
@@ -1893,9 +1876,11 @@ const marcarEntregada = async (req, res) => {
       || cargoReceptor.length > 120
       || !descripcionBienes
       || descripcionBienes.length > 2000
+      || recibeIdentificacion.length > 40
+      || recibeInstitucion.length > 180
     ) {
       return res.status(400).json({
-        msg: "Completa nombres, apellidos, cargo y descripción de los bienes (máximo 120/2000 caracteres)",
+        msg: "Completa nombres, apellidos, cargo y descripción; identificación e institución son opcionales (máximo 120/2000/40/180 caracteres)",
       });
     }
     if (!/^\+?[0-9\s()-]{7,20}$/.test(telefonoReceptor)) {
@@ -1927,8 +1912,14 @@ const marcarEntregada = async (req, res) => {
       const current = await Donacion.findById(id).populate(
         "recolector",
         "nombre apellido email telefono"
-      ).populate("campana", "nombre activa");
-      return res.status(200).json({ donacion: current, duplicada: true });
+      ).populate("campana", "nombre activa")
+        .populate("entregas.recolector", "_id nombre apellido");
+      const serialized = serializeDonationResponse(current);
+      return res.status(200).json({
+        donacion: serialized,
+        entrega: serialized.entrega,
+        duplicada: true,
+      });
     }
     if (actual.estado !== "en_entrega") {
       return res.status(409).json({
@@ -1957,17 +1948,19 @@ const marcarEntregada = async (req, res) => {
 
     uploadedImage = await uploadImage(image, "donaty/evidencias/finalizacion");
     const deliveredAt = new Date();
-    const delivery = {
+    const delivery = createIndividualDonationDeliveryRecord({
       nombresReceptor,
       apellidosReceptor,
+      recibeIdentificacion,
+      recibeInstitucion,
       telefonoReceptor,
       cargoReceptor,
       descripcionBienes,
       recolector: user._id,
       fecha: deliveredAt,
-      ...uploadedImage,
+      imagen: uploadedImage,
       idempotencyKey,
-    };
+    });
     const updated = await Donacion.findOneAndUpdate(
       {
         _id: id,
@@ -1980,13 +1973,13 @@ const marcarEntregada = async (req, res) => {
         $set: { estado: "entregada" },
         $push: {
           entregas: delivery,
-          evidencias: {
+          evidencias: createDonationEvidenceRecords({
             etapa: "finalizacion",
             recolector: user._id,
             fecha: deliveredAt,
-            ...uploadedImage,
+            imagenes: [uploadedImage],
             idempotencyKey,
-          },
+          })[0],
           historialEstados: statusHistoryEntry("entregada", user),
         },
       },
@@ -2007,8 +2000,14 @@ const marcarEntregada = async (req, res) => {
         const donation = await Donacion.findById(id).populate(
           "recolector",
           "nombre apellido email telefono"
-        ).populate("campana", "nombre activa");
-        return res.status(200).json({ donacion: donation, duplicada: true });
+        ).populate("campana", "nombre activa")
+          .populate("entregas.recolector", "_id nombre apellido");
+        const serialized = serializeDonationResponse(donation);
+        return res.status(200).json({
+          donacion: serialized,
+          entrega: serialized.entrega,
+          duplicada: true,
+        });
       }
       return res.status(409).json({
         msg: "La asignación o el estado cambió; no se registró la entrega",
@@ -2018,7 +2017,12 @@ const marcarEntregada = async (req, res) => {
     uploadedImage = null;
     publishDonationEvent(req, "donation.status.updated", updated);
     void notifyDonationStatusChange(updated, "en_entrega", "entregada", user);
-    return res.status(200).json({ donacion: updated, duplicada: false });
+    const serialized = serializeDonationResponse(updated);
+    return res.status(200).json({
+      donacion: serialized,
+      entrega: serialized.entrega,
+      duplicada: false,
+    });
   } catch (error) {
     if (uploadedImage?.imagenPublicId) {
       try {
