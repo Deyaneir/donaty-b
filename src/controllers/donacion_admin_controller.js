@@ -10,6 +10,7 @@ import {
   getAcademicPeriodStartMonth,
   resolveAcademicPeriod,
 } from "../utils/academicPeriod.js";
+import { donationStatusLabel } from "../utils/donationStatus.js";
 
 const ESTADOS = [
   "pendiente",
@@ -119,6 +120,7 @@ const listarDonacionesAdmin = async (req, res) => {
         const donation = item.toObject();
         return {
           ...donation,
+          estadoLabel: donationStatusLabel(donation.estado),
           periodoAcademico:
             donation.periodoAcademico
             || donation.campana?.periodoAcademico

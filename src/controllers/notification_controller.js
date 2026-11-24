@@ -6,6 +6,7 @@ import Campana from "../models/Campana.js";
 import Donante from "../models/Donante.js";
 import Recolector from "../models/Recolector.js";
 import Admin from "../models/Admin.js";
+import { donationStatusLabel } from "../utils/donationStatus.js";
 
 const VALID_ROLES = new Set(["donante", "recolector", "admin"]);
 const VALID_PLATFORMS = new Set(["android", "ios", "web"]);
@@ -111,7 +112,7 @@ const listarNotificaciones = async (req, res) => {
       .filter(Boolean))];
     const donations = donationIds.length
       ? await Donacion.find({ _id: { $in: donationIds } })
-        .select("_id donante donanteExterno nombreDonante recolector campana")
+        .select("_id donante donanteExterno nombreDonante recolector campana nombreBien descripcion categoria subcategoria")
         .populate("donante", "_id nombre apellido")
         .populate("recolector", "_id nombre apellido")
         .populate("campana", "_id nombre")
@@ -172,11 +173,26 @@ const listarNotificaciones = async (req, res) => {
       const collector = collectorById.get(collectorId);
       const campaign = campaignById.get(campaignId);
       const changedBy = adminById.get(changedById);
+      const donationName = String(
+        data.donationName
+        || donation?.nombreBien
+        || donation?.descripcion
+        || [donation?.categoria, donation?.subcategoria].filter(Boolean).join(" · ")
+        || ""
+      ).trim();
+      const previousStatus = String(data.previousStatus || data.previousState || "");
+      const newStatus = String(data.newStatus || data.status || data.estado || "");
+      const previousStatusLabel = donationStatusLabel(previousStatus);
+      const newStatusLabel = donationStatusLabel(newStatus);
+      const notificationBody = item.type === "donation_status"
+        ? `El estado de ${donationName ? `“${donationName}”` : "tu aporte"} cambió de ${previousStatusLabel} a ${newStatusLabel}.`
+        : item.body;
       return {
         id: String(item._id),
         type: notificationType(item.type),
         title: item.title,
-        message: item.body,
+        message: notificationBody,
+        donationName,
         isRead: Boolean(item.readAt),
         createdAt: item.createdAt,
         readAt: item.readAt,
@@ -194,8 +210,12 @@ const listarNotificaciones = async (req, res) => {
           donationId: idString(item.donationId || data.donationId || data.donacionId),
           campaignId,
           conversationId: String(item.conversationId || data.conversationId || data.roomId || ""),
-          previousStatus: data.previousStatus || data.previousState || "",
-          newStatus: data.newStatus || data.status || data.estado || "",
+          donationName,
+          donationDescription: String(donation?.descripcion || data.donationDescription || ""),
+          previousStatus,
+          previousStatusLabel,
+          newStatus,
+          newStatusLabel,
           donorId,
           donorName: data.donorName || fullName(donor) || donation?.nombreDonante || "",
           collectorId,
@@ -222,7 +242,7 @@ const listarNotificaciones = async (req, res) => {
         },
         _id: item._id,
         recipientRole: item.recipientRole,
-        body: item.body,
+        body: notificationBody,
       };
     });
     const unreadCount = await NotificationEvent.countDocuments({

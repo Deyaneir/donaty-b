@@ -40,7 +40,14 @@ test("donation QR returns the assigned collector's current real location without
       buildingId: 16,
       buildingName: "Facultad de Ingeniería",
     },
-    evidencias: [],
+    evidencias: [{
+      etapa: "finalizacion",
+      recolector: ids.collector,
+      fecha: receivedAt,
+      imagenUrl: "https://images.example.test/individual-delivery.jpg",
+      imagenPublicId: "delivery-proof",
+      idempotencyKey: "delivery-once",
+    }],
     historialEstados: [],
     historialRecolectores: [],
     estado: "asignada",
@@ -66,6 +73,7 @@ test("donation QR returns the assigned collector's current real location without
     findCollector: Recolector.findById,
     findDelivery: EntregaCampana.findOne,
   };
+  let deliveryFilter;
   Donacion.findById = () => ({
     populate() {
       return this;
@@ -86,12 +94,22 @@ test("donation QR returns the assigned collector's current real location without
     },
     lean: async () => collector,
   });
-  EntregaCampana.findOne = () => ({
+  EntregaCampana.findOne = (filter) => {
+    deliveryFilter = filter;
+    return {
     select() {
       return this;
     },
-    lean: async () => null,
-  });
+    lean: async () => ({
+      _id: "delivery-example",
+      campana: ids.campaign,
+      evidencias: [{
+        imagenUrl: "https://images.example.test/campaign-delivery.jpg",
+        fecha: receivedAt,
+      }],
+    }),
+    };
+  };
 
   const response = {
     statusCode: null,
@@ -107,7 +125,7 @@ test("donation QR returns the assigned collector's current real location without
   try {
     await leerDonacionQR(
       {
-        user: { _id: "507f1f77bcf86cd799439016", rol: "admin" },
+        user: { _id: ids.donor, rol: "donante" },
         params: { id: ids.donation },
       },
       response
@@ -127,6 +145,19 @@ test("donation QR returns the assigned collector's current real location without
       longitud: -78.4678,
     });
     assert.equal(response.body.ubicacionResponsable.estadoGeografico, "fuera");
+    assert.equal(String(deliveryFilter.campana), ids.campaign);
+    assert.equal(
+      String(deliveryFilter["donaciones.donacion"]),
+      ids.donation
+    );
+    assert.equal(
+      response.body.evidenciasPorEtapa.finalizacion[0].fotografias[0].imagenUrl,
+      "https://images.example.test/individual-delivery.jpg"
+    );
+    assert.equal(
+      response.body.entregaGeneralCampana.evidencias[0].imagenUrl,
+      "https://images.example.test/campaign-delivery.jpg"
+    );
     assert.equal(
       response.body.ubicacionResponsable.actualizadoEn.toISOString(),
       receivedAt.toISOString()

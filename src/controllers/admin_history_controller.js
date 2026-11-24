@@ -5,6 +5,8 @@ import Donacion from "../models/Donacion.js";
 import Donante from "../models/Donante.js";
 import EntregaCampana from "../models/EntregaCampana.js";
 import Recolector from "../models/Recolector.js";
+import { urlPublica } from "../utils/publicUrl.js";
+import { donationStatusLabel } from "../utils/donationStatus.js";
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_LIMIT = 20;
@@ -450,6 +452,12 @@ const eventDate = (events, state) => {
   return event?.fecha ?? null;
 };
 
+const serializeDonationEvidenceUrls = (evidences = []) =>
+  evidences.map((evidence) => ({
+    ...evidence,
+    imagenUrl: urlPublica(evidence.imagenUrl),
+  }));
+
 const makeStateTimeline = async (entries = []) => {
   const modelsByRole = new Map([
     ["admin", Admin],
@@ -493,6 +501,7 @@ const makeStateTimeline = async (entries = []) => {
     return {
       estadoAnterior: entry.estadoAnterior ?? previous?.estado ?? null,
       estadoNuevo: entry.estadoNuevo ?? entry.estado ?? null,
+      estadoLabel: donationStatusLabel(entry.estadoNuevo ?? entry.estado),
       fecha: entry.fecha ?? null,
       usuarioResponsable: person
         ? {
@@ -521,7 +530,7 @@ const findDonationDelivery = (donation, campaignDelivery) => {
         estado: campaignDelivery.estado,
         receptor: campaignDelivery.receptor,
         descripcionBienes: campaignDelivery.descripcionBienes,
-        evidencias: (campaignDelivery.evidencias || []).map((evidence) => ({
+        evidencias: serializeDonationEvidenceUrls(campaignDelivery.evidencias || []).map((evidence) => ({
           imagenUrl: evidence.imagenUrl,
           fecha: evidence.fecha,
         })),
@@ -538,7 +547,10 @@ const serializeIndividualDeliveries = (deliveries = []) => deliveries.map((deliv
   descripcionBienes: delivery.descripcionBienes,
   recolector: delivery.recolector,
   fecha: delivery.fecha,
-  imagenUrl: delivery.imagenUrl,
+  imagenUrl: urlPublica(delivery.imagenUrl),
+  evidencias: delivery.imagenUrl
+    ? [{ imagenUrl: urlPublica(delivery.imagenUrl), fecha: delivery.fecha }]
+    : [],
 }));
 
 const donationCard = (donation, campaignDelivery) => {
@@ -558,6 +570,7 @@ const donationCard = (donation, campaignDelivery) => {
     cantidad: donation.cantidad ?? null,
     fechaRegistro: donation.fechaRegistro ?? donation.createdAt ?? null,
     estado: donation.estado,
+    estadoLabel: donationStatusLabel(donation.estado),
     campana: campaign
       ? {
           _id: campaign._id,
@@ -1059,7 +1072,7 @@ const listDonorCampaignDonations = async (req, res) => {
           campana: campaignId,
           "donaciones.donacion": { $in: donationIds },
         })
-          .select("campana receptor fechaEntrega descripcionBienes estado donaciones")
+          .select("campana receptor fechaEntrega descripcionBienes estado donaciones evidencias")
           .lean()
       : null;
     const items = getCampaignDonationDelivery(

@@ -179,6 +179,10 @@ test("donor donation history retains all statuses and populated campaign covers"
       },
     }),
   }));
+  const deliveryEvidence = {
+    imagenUrl: "https://images.example.test/delivery-proof.jpg",
+    fecha: new Date("2026-11-23T12:00:00.000Z"),
+  };
   Donacion.find = (filter) => {
     donationFilter = filter;
     return {
@@ -197,7 +201,11 @@ test("donor donation history retains all statuses and populated campaign covers"
     select() {
       return this;
     },
-    lean: async () => [],
+    lean: async () => [{
+      campana: campaignId,
+      evidencias: [deliveryEvidence],
+      donaciones: [{ donacion: "donation-0" }],
+    }],
   });
   const response = makeResponse();
   try {
@@ -211,6 +219,11 @@ test("donor donation history retains all statuses and populated campaign covers"
     assert.ok(response.body.items.every(
       (item) => item.campana.imagenUrl === "https://images.example.test/campaign.jpg"
     ));
+    assert.equal(response.body.items[0].estadoLabel, "Asignada");
+    assert.deepEqual(
+      response.body.items[0].entregaGeneralCampana.evidencias,
+      [deliveryEvidence]
+    );
   } finally {
     Donacion.find = originalDonationFind;
     EntregaCampana.find = originalDeliveryFind;

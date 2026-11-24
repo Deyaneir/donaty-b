@@ -29,6 +29,7 @@ import {
   hasValidCollectorCoordinates,
 } from "../utils/collectorLocation.js";
 import { serializeCampaignDeliveryForDonor } from "../utils/campaignDelivery.js";
+import { donationStatusLabel } from "../utils/donationStatus.js";
 import { isInsideEpnCampus } from "../utils/epnCampusGeofence.js";
 import {
   isCollectorAssignedToPoint,
@@ -117,6 +118,15 @@ const notifyDonationStatusChange = async (
     const collectorName = fullName(donacion.recolector);
     const campaignName = String(donacion.campana?.nombre || "");
     const changedByName = fullName(changedBy);
+    const donationName = String(
+      donacion.nombreBien
+      || donacion.descripcion
+      || [donacion.categoria, donacion.subcategoria].filter(Boolean).join(" · ")
+      || ""
+    ).trim();
+    const displayName = donationName ? `“${donationName}”` : "tu aporte";
+    const previousStatusLabel = donationStatusLabel(previousStatus);
+    const newStatusLabel = donationStatusLabel(nextStatus);
     const recipients = [
       ...(donacion.donante
         ? [{ userId: donacion.donante._id || donacion.donante, role: "donante" }]
@@ -129,8 +139,8 @@ const notifyDonationStatusChange = async (
     await notifyUsers({
       eventKey: `donation-status:${donacion._id}:${previousStatus}:${nextStatus}:${new Date(donacion.updatedAt || Date.now()).getTime()}`,
       recipients,
-      title: "Estado de donación actualizado",
-      body: `La donación ${donacion._id} cambió de ${previousStatus} a ${nextStatus}.`,
+      title: "Estado de tu donación actualizado",
+      body: `El estado de ${displayName} cambió de ${previousStatusLabel} a ${newStatusLabel}.`,
       data: {
         type: "donation_status",
         tipo: "donation_status",
@@ -143,6 +153,10 @@ const notifyDonationStatusChange = async (
         status: nextStatus,
         estado: nextStatus,
         newStatus: nextStatus,
+        previousStatusLabel,
+        newStatusLabel,
+        donationName,
+        donationDescription: String(donacion.descripcion || ""),
         donorId: String(donacion.donante?._id || donacion.donante || ""),
         donorName,
         collectorId: String(donacion.recolector?._id || donacion.recolector || ""),
@@ -179,6 +193,13 @@ const normalizeTipo = (value = "") => {
 };
 
 const normalizeEstado = (value = "") => String(value).trim().toLowerCase();
+const withDonationStatusLabel = (item) => {
+  const donation = typeof item?.toObject === "function" ? item.toObject() : item;
+  return {
+    ...donation,
+    estadoLabel: donationStatusLabel(donation?.estado),
+  };
+};
 const getCampaignDonationRegistrationError = (campaign) => {
   const state = String(campaign?.estado ?? "").toLowerCase();
   if (state === "finalizada" || isCampaignScheduleFinished(campaign)) {
@@ -731,20 +752,36 @@ const listarMisDonaciones = async (req, res) => {
     )];
     const deliveries = campaignIds.length
       ? await EntregaCampana.find({ campana: { $in: campaignIds } })
-        .select("_id campana receptor nombresReceptor apellidosReceptor telefonoReceptor cargoReceptor descripcionBienes fechaEntrega responsablesCampana evidencias estado createdAt updatedAt")
+        .select("_id campana receptor nombresReceptor apellidosReceptor telefonoReceptor cargoReceptor descripcionBienes fechaEntrega responsablesCampana evidencias donaciones estado createdAt updatedAt")
         .lean()
       : [];
     const deliveryByCampaign = new Map(
       deliveries.map((delivery) => [String(delivery.campana), delivery])
     );
     return res.status(200).json({
-      items: items.map((item) => ({
-        ...item.toObject(),
-        entregaGeneralCampana: serializeCampaignDeliveryForDonor(
-          deliveryByCampaign.get(String(item.campana?._id || "")),
-          item.campana?._id || null
-        ),
-      })),
+      items: items.map((item) => {
+        const donation = item.toObject();
+        const campaignDelivery = deliveryByCampaign.get(String(item.campana?._id || ""));
+        const donationHasDelivery = campaignDelivery?.donaciones?.some(
+          (entry) => String(entry.donacion?._id ?? entry.donacion) === String(donation._id)
+        );
+        return {
+          ...donation,
+          estadoLabel: donationStatusLabel(donation.estado),
+          evidencias: (donation.evidencias || []).map((evidence) => ({
+            ...evidence,
+            imagenUrl: urlPublica(evidence.imagenUrl),
+          })),
+          entregas: (donation.entregas || []).map((delivery) => ({
+            ...delivery,
+            imagenUrl: urlPublica(delivery.imagenUrl),
+          })),
+          entregaGeneralCampana: serializeCampaignDeliveryForDonor(
+            donationHasDelivery ? campaignDelivery : null,
+            donationHasDelivery ? item.campana?._id || null : null
+          ),
+        };
+      }),
     });
   } catch (error) {
     console.error(error);
@@ -788,7 +825,7 @@ const listarDonaciones = async (req, res) => {
       .populate("donante", "nombre apellido email telefono")
       .populate("recolector", "nombre apellido email telefono");
 
-    return res.status(200).json({ items });
+    return res.status(200).json({ items: items.map(withDonationStatusLabel) });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ msg: `❌ Error en el servidor - ${error}` });
@@ -803,7 +840,7 @@ const listarDonacionesPublic = async (_req, res) => {
       .sort({ createdAt: -1 })
       .limit(50)
       .populate("donante", "nombre apellido");
-    return res.status(200).json({ items });
+    return res.status(200).json({ items: items.map(withDonationStatusLabel) });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ msg: `❌ Error en el servidor - ${error}` });
@@ -856,6 +893,7 @@ const serializeDonationStatusHistory = async (entries = []) => {
       : null;
     return {
       ...item,
+      estadoLabel: donationStatusLabel(item.estado),
       responsableDetalle: person
         ? {
             _id: person._id,
@@ -944,6 +982,11 @@ const leerDonacionQR = async (req, res) => {
     const evidenciasPorEtapa = serializeDonationEvidence(donacion.evidencias);
     const donacionPayload = donacion.toObject();
     donacionPayload.imagenUrl = urlPublica(donacionPayload.imagenUrl);
+    donacionPayload.entregas = (donacionPayload.entregas || []).map((delivery) => ({
+      ...delivery,
+      imagenUrl: urlPublica(delivery.imagenUrl),
+    }));
+    donacionPayload.estadoLabel = donationStatusLabel(donacion.estado);
     donacionPayload.evidencias = evidenciasPorEtapa;
     const historialEstados = sortDonationHistory(donacion.historialEstados);
     const historialEstadosConResponsable =
@@ -968,7 +1011,10 @@ const leerDonacionQR = async (req, res) => {
         };
       });
     const entregaGeneral = campaign?._id
-      ? await EntregaCampana.findOne({ campana: campaign._id })
+      ? await EntregaCampana.findOne({
+          campana: campaign._id,
+          "donaciones.donacion": donacion._id,
+        })
         .select("_id campana receptor nombresReceptor apellidosReceptor telefonoReceptor cargoReceptor descripcionBienes fechaEntrega responsablesCampana evidencias estado createdAt updatedAt")
         .lean()
       : null;
@@ -1037,7 +1083,7 @@ const listarPendientesRecolector = async (req, res) => {
     )
       .sort({ createdAt: -1 })
       .populate("donante", "nombre apellido");
-    return res.status(200).json({ items });
+    return res.status(200).json({ items: items.map(withDonationStatusLabel) });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ msg: `❌ Error en el servidor - ${error}` });
@@ -1058,7 +1104,7 @@ const listarAsignadasRecolector = async (req, res) => {
       .populate("recolector", "nombre apellido email telefono")
       .populate("registradoPorRecolector", "nombre apellido email telefono")
       .populate("campana", "nombre activa");
-    return res.status(200).json({ items });
+    return res.status(200).json({ items: items.map(withDonationStatusLabel) });
   } catch (error) {
     console.error(error);
     return res.status(500).json({ msg: `❌ Error en el servidor - ${error}` });

@@ -1,3 +1,5 @@
+import { urlPublica } from "./publicUrl.js";
+
 const serializeCampaignDeliveryForDonor = (delivery, campaignId = null) => {
   if (!delivery) {
     return {
@@ -23,7 +25,7 @@ const serializeCampaignDeliveryForDonor = (delivery, campaignId = null) => {
       cargo: person.cargo,
     })),
     evidencias: (delivery.evidencias || []).map((evidence) => ({
-      imagenUrl: evidence.imagenUrl,
+      imagenUrl: urlPublica(evidence.imagenUrl),
       fecha: evidence.fecha,
     })),
     estado: delivery.estado,
