@@ -79,12 +79,47 @@ const calcularPuedeEntregar = (
   };
 };
 
-const findCampaignPrincipalPoint = (campaign, collectorId) =>
-  (campaign?.puntosRecoleccion || []).find(
+const getCampaignPrincipalCollectorId = (campaign, point) => {
+  const explicitPrincipalId = String(
+    point?.responsableRecolector?._id ?? point?.responsableRecolector ?? ""
+  );
+  if (explicitPrincipalId) return explicitPrincipalId;
+
+  const points = campaign?.puntosRecoleccion || [];
+  const assignedCollectorIds = new Set(
+    points.flatMap((assignedPoint) => [
+      ...(assignedPoint.recolectores || []).map((collector) =>
+        String(collector?._id ?? collector ?? "")
+      ),
+      ...(assignedPoint.responsableRecolector
+        ? [String(assignedPoint.responsableRecolector?._id ?? assignedPoint.responsableRecolector)]
+        : []),
+    ]).filter(Boolean)
+  );
+  if (assignedCollectorIds.size !== 1) return "";
+
+  const [soleCollectorId] = assignedCollectorIds;
+  const isAssignedToPoint = (point.recolectores || []).some(
+    (collector) => String(collector?._id ?? collector ?? "") === soleCollectorId
+  ) || String(point.responsableRecolector?._id ?? point.responsableRecolector ?? "")
+    === soleCollectorId;
+  return isAssignedToPoint ? soleCollectorId : "";
+};
+
+const findCampaignPrincipalPoint = (campaign, collectorId) => {
+  const points = campaign?.puntosRecoleccion || [];
+  const requestedId = String(collectorId ?? "");
+  const explicitlyAssignedPoint = points.find(
     (point) =>
       String(point.responsableRecolector?._id ?? point.responsableRecolector ?? "")
-      === String(collectorId)
+      === requestedId
+  );
+  if (explicitlyAssignedPoint) return explicitlyAssignedPoint;
+
+  return points.find(
+    (point) => getCampaignPrincipalCollectorId(campaign, point) === requestedId
   ) || null;
+};
 
 const buildDeliveryInventory = (donations, campaign = null, classifications = []) => {
   const traces = [];
@@ -494,6 +529,7 @@ const createCampaignDelivery = async ({
 export {
   buildDeliveryInventory,
   buildDeliveryGoodsDescription,
+  getCampaignPrincipalCollectorId,
   findCampaignPrincipalPoint,
   isCampaignFinished,
   createCampaignDelivery,

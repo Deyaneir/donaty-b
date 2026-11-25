@@ -40,6 +40,7 @@ import {
 import { publishCampaignEvent } from "../services/domainEvents.js";
 import { transferCampaignCollectorDonations } from "../services/campaignCollectorReassignment.js";
 import {
+  getCampaignPrincipalCollectorId,
   getCampaignDeliveryReadiness,
   isCampaignFinished,
 } from "../services/campaignDelivery.js";
@@ -2044,9 +2045,7 @@ const listarDistribucionRecolectores = async (req, res) => {
         campanaId: String(campaign._id),
         puntos: assignedPoints.map((point) => {
           const pointCollectorIds = getPointCollectorIds(point);
-          const principalId = String(
-            point.responsableRecolector?._id ?? point.responsableRecolector ?? ""
-          );
+          const principalId = getCampaignPrincipalCollectorId(campaign, point);
           const serializeCollector = (id) => {
             const collector = collectorsById.get(String(id));
             if (!collector) return null;
@@ -2109,7 +2108,7 @@ const listarDistribucionRecolectores = async (req, res) => {
           collectorId: String(collectorId),
           pointId: String(point._id),
           pointName: point.nombre ?? "",
-          rolPunto: String(point.responsableRecolector || "") === String(collectorId)
+          rolPunto: getCampaignPrincipalCollectorId(campaign, point) === String(collectorId)
             ? "principal"
             : "apoyo",
         }))
@@ -2168,11 +2167,9 @@ const listarDistribucionRecolectores = async (req, res) => {
       asignacionesActuales: currentAssignments.map((assignment) => ({
         ...assignment,
         recolector: collectorsById.get(assignment.collectorId) || null,
-      })),
+      })      ),
       puntos: (campaign.puntosRecoleccion || []).map((point) => {
-        const principalId = String(
-          point.responsableRecolector?._id ?? point.responsableRecolector ?? ""
-        );
+        const principalId = getCampaignPrincipalCollectorId(campaign, point);
         const recolectores = getPointCollectorIds(point)
           .map((id) => {
             const collector = collectorsById.get(String(id));

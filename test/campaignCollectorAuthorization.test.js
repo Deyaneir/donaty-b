@@ -39,11 +39,11 @@ const campaign = {
   ],
 };
 
-const invoke = async (userId) => {
+const invoke = async (userId, campaignRecord = campaign) => {
   const originalFindById = Campana.findById;
   const originalRecolectorFind = Recolector.find;
   let collectorFilter;
-  Campana.findById = () => ({ lean: async () => campaign });
+  Campana.findById = () => ({ lean: async () => campaignRecord });
   Recolector.find = (filter) => {
     collectorFilter = filter;
     return {
@@ -82,7 +82,7 @@ const invoke = async (userId) => {
   }
 };
 
-const invokeAdmin = async () => {
+const invokeAdmin = async (campaignRecord = campaign) => {
   const originalFindById = Campana.findById;
   const originalRecolectorFind = Recolector.find;
   Campana.findById = () => ({
@@ -90,7 +90,7 @@ const invokeAdmin = async () => {
       return this;
     },
     lean: async () => ({
-      ...campaign,
+      ...campaignRecord,
       numeroRecolectores: 2,
       historialAsignacionesRecolectores: [],
     }),
@@ -190,6 +190,34 @@ test("unassigned collector cannot query campaign distribution", async () => {
 
   assert.equal(response.statusCode, 403);
   assert.equal(collectorFilter, undefined);
+});
+
+test("the sole assigned collector is reported as principal without an explicit role", async () => {
+  const singleCollectorCampaign = {
+    ...campaign,
+    puntosRecoleccion: [{
+      _id: "672a3c4d5e6f708192a3c4d3",
+      nombre: "Punto único",
+      responsableRecolector: null,
+      recolectores: [collectorIds.requester],
+    }],
+  };
+  const { response } = await invoke(collectorIds.requester, singleCollectorCampaign);
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body.puntos[0].responsableRecolector, {
+    _id: collectorIds.requester,
+    nombre: "Ana",
+    apellido: "Uno",
+    rolPunto: "principal",
+  });
+  assert.equal(response.body.puntos[0].recolectores[0].rolPunto, "principal");
+
+  const adminResponse = await invokeAdmin(singleCollectorCampaign);
+  const adminPoint = adminResponse.body.puntos[0];
+  assert.equal(adminPoint.responsableRecolector._id, collectorIds.requester);
+  assert.equal(adminPoint.recolectores[0].rolPunto, "principal");
+  assert.equal(adminResponse.body.asignacionesActuales[0].rolPunto, "principal");
 });
 
 test("admin distribution includes populated principal and support collectors", async () => {

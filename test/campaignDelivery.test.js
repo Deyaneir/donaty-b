@@ -11,12 +11,16 @@ import Clasificacion from "../src/models/Clasificacion.js";
 import EntregaCampana from "../src/models/EntregaCampana.js";
 import Campana from "../src/models/Campana.js";
 import Donacion from "../src/models/Donacion.js";
+import Recolector from "../src/models/Recolector.js";
 import { serializeCampaignDeliveryForDonor } from "../src/utils/campaignDelivery.js";
 import {
   buildPointAssignmentsAfterRoleChange,
   normalizeCampaignResponsibilities,
 } from "../src/controllers/campana_controller.js";
-import { consultarEntregaGeneral } from "../src/controllers/entrega_campana_controller.js";
+import {
+  consultarEntregaGeneral,
+  consultarEstadoEntregaGeneral,
+} from "../src/controllers/entrega_campana_controller.js";
 import { listarCampanasAdmin } from "../src/controllers/campana_admin_controller.js";
 import { marcarEntregada } from "../src/controllers/donacion_controller.js";
 import campaignRouter from "../src/routers/campana_routes.js";
@@ -529,6 +533,103 @@ test("delivery readiness reports principal and all donations ready using POST ru
   assert.equal(readiness.donacionesPendientes, 0);
   assert.equal(readiness.entregaRegistrada, false);
   assert.equal(readiness.puedeRegistrarEntrega, true);
+});
+
+test("the sole assigned collector is the campaign principal when no explicit principal is stored", async () => {
+  const campaignRecord = {
+    ...structuredClone(campaign),
+    puntosRecoleccion: [{
+      _id: "point-1",
+      recolectores: ["collector-1"],
+      responsableRecolector: null,
+    }],
+  };
+  const models = makeModels({
+    campaignRecord,
+    donationRecords: [{
+      ...structuredClone(donations[0]),
+      puntoRecoleccionRef: "point-1",
+      estado: "en_entrega",
+    }],
+  });
+  const readiness = await getReadiness(models);
+
+  assert.equal(readiness.esRecolectorPrincipal, true);
+  assert.equal(readiness.puedeRegistrarEntrega, true);
+});
+
+test("a single collector is not inferred as principal when multiple collectors are assigned", async () => {
+  const campaignRecord = {
+    ...structuredClone(campaign),
+    puntosRecoleccion: [{
+      _id: "point-1",
+      recolectores: ["collector-1", "collector-2"],
+      responsableRecolector: null,
+    }],
+  };
+  const readiness = await getReadiness(makeModels({ campaignRecord }));
+
+  assert.equal(readiness.esRecolectorPrincipal, false);
+  assert.equal(readiness.puedeRegistrarEntrega, false);
+});
+
+test("delivery state endpoint allows the sole assigned collector to register a completed campaign delivery", async (t) => {
+  const originals = {
+    findCampaign: Campana.findById,
+    findCollector: Recolector.findOne,
+    findDelivery: EntregaCampana.findOne,
+    findDonations: Donacion.find,
+  };
+  const campaignId = "507f1f77bcf86cd799439011";
+  const collectorId = "507f1f77bcf86cd799439012";
+  const campaignRecord = {
+    _id: campaignId,
+    estado: "finalizada",
+    activa: false,
+    puntosRecoleccion: [{
+      _id: "507f1f77bcf86cd799439013",
+      recolectores: [collectorId],
+      responsableRecolector: null,
+    }],
+  };
+  Campana.findById = () => ({
+    select() { return this; },
+    lean: async () => campaignRecord,
+  });
+  Recolector.findOne = () => query(() => ({ _id: collectorId }));
+  EntregaCampana.findOne = () => query(() => null);
+  Donacion.find = () => query(() => [{
+    _id: "507f1f77bcf86cd799439014",
+    estado: "en_entrega",
+    clasificacionId: "507f1f77bcf86cd799439015",
+  }]);
+  const response = responseStub();
+  t.after(() => {
+    Campana.findById = originals.findCampaign;
+    Recolector.findOne = originals.findCollector;
+    EntregaCampana.findOne = originals.findDelivery;
+    Donacion.find = originals.findDonations;
+  });
+
+  await consultarEstadoEntregaGeneral({
+    user: { _id: collectorId, rol: "recolector" },
+    params: { campaignId },
+  }, response);
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body, {
+    campanaId: campaignId,
+    puedeRegistrarEntrega: true,
+    puedeEntregar: true,
+    esRecolectorPrincipal: true,
+    campanaFinalizada: true,
+    todasEnEntrega: true,
+    totalDonaciones: 1,
+    donacionesPendientes: 0,
+    donacionesSinClasificacion: 0,
+    entregaRegistrada: false,
+    motivos: [],
+  });
 });
 
 test("campaign delivery requires a finalized campaign even when all donations are ready", async () => {
