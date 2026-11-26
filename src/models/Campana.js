@@ -25,6 +25,7 @@ const puntoRecoleccionSchema = new Schema(
     latitud: { type: Number, min: -90, max: 90, default: null },
     longitud: { type: Number, min: -180, max: 180, default: null },
     activo: { type: Boolean, default: true },
+    recolectoresRequeridos: { type: Number, min: 1, max: 3, default: null },
     recolectores: [{ type: Schema.Types.ObjectId, ref: "Recolector" }],
     responsableRecolector: {
       type: Schema.Types.ObjectId,

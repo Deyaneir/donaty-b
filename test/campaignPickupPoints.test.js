@@ -104,10 +104,86 @@ test("accepts a principal without requiring secondary collectors", () => {
   const [point] = normalizePickupPoints([{
     ...mobilePayload,
     responsableRecolector: principal,
+    recolectoresRequeridos: 1,
   }], [], true, true);
 
   assert.equal(String(point.responsableRecolector), principal);
   assert.deepEqual(point.recolectores.map(String), [principal]);
+  assert.equal(point.recolectoresRequeridos, 1);
+});
+
+test("preserves the per-point requirement when editing other point fields", () => {
+  const principal = "507f1f77bcf86cd799439021";
+  const [existing] = normalizePickupPoints([{
+    ...mobilePayload,
+    responsableRecolector: principal,
+    recolectoresRequeridos: 2,
+    recolectoresSecundarios: ["507f1f77bcf86cd799439022"],
+  }], [], true, true);
+  const [updated] = normalizePickupPoints(
+    [{ _id: existing._id, nombre: "Punto actualizado" }],
+    [existing],
+    false,
+    true
+  );
+
+  assert.equal(updated.recolectoresRequeridos, 2);
+});
+
+test("validates the required collector count independently for each point", () => {
+  const principal = "507f1f77bcf86cd799439021";
+  const firstSupport = "507f1f77bcf86cd799439022";
+  const secondSupport = "507f1f77bcf86cd799439023";
+  const point = (recolectoresRequeridos, recolectoresSecundarios = []) => ({
+    ...mobilePayload,
+    responsableRecolector: principal,
+    recolectoresRequeridos,
+    recolectoresSecundarios,
+  });
+
+  assert.doesNotThrow(() =>
+    normalizePickupPoints([point(1)], [], true, true)
+  );
+  assert.throws(
+    () => normalizePickupPoints([point(2)], [], true, true),
+    { statusCode: 409, message: "Falta 1 recolector para completar el punto" }
+  );
+  assert.doesNotThrow(() =>
+    normalizePickupPoints([point(2, [firstSupport])], [], true, true)
+  );
+  assert.doesNotThrow(() =>
+    normalizePickupPoints([point(3, [firstSupport, secondSupport])], [], true, true)
+  );
+  assert.throws(
+    () => normalizePickupPoints([
+      point(2),
+      {
+        ...point(3, [firstSupport, secondSupport]),
+        nombre: "Segundo punto",
+      },
+    ], [], true, true),
+    { statusCode: 409, message: "Falta 1 recolector para completar el punto" }
+  );
+});
+
+test("requires a principal for configured collector slots and rejects duplicate principal", () => {
+  const principal = "507f1f77bcf86cd799439021";
+  assert.throws(
+    () => normalizePickupPoints([{
+      ...mobilePayload,
+      recolectoresRequeridos: 1,
+    }], [], true, true),
+    { statusCode: 400, message: "Debes asignar un recolector principal al punto" }
+  );
+  assert.throws(
+    () => normalizePickupPoints([{
+      ...mobilePayload,
+      responsableRecolector: principal,
+      recolectoresRequeridos: 2,
+      recolectoresSecundarios: [principal],
+    }], [], true, true),
+    { statusCode: 409, message: /no puede repetirse como secundario/ }
+  );
 });
 
 test("persists multiple non-overlapping weekly point hours", () => {

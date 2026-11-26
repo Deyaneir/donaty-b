@@ -26,6 +26,8 @@ Los administradores pueden crear o editar `puntosRecoleccion` en las operaciones
 }
 ```
 
+`recolectoresRequeridos` es opcional por punto y admite de 1 a 3 (es independiente del `numeroRecolectores` de la campaña). Cuando se envía, el total de asignados se calcula sin duplicados e incluye a `responsableRecolector`; los recolectores secundarios completan los cupos restantes. Por ejemplo, con 1 requerido basta el principal y una lista `recolectoresSecundarios` vacía; si faltan asignados, creación y edición responden `409` con la cantidad faltante. El campo se conserva al editar el punto.
+
 `POST /api/campanas` acepta `multipart/form-data` con `nombre`, `descripcion`, `ubicacion`, `fechaInicio`, `fechaFin`, `periodoAcademico`, `diasAtencion` (lista JSON), `horaInicio`, `horaFin`, `numeroRecolectores`, `metaDonaciones` y `activa`. Los valores numéricos y booleanos pueden enviarse como texto multipart; `activa` debe ser `false` al crear porque las campañas se guardan como borrador y se activan después. `imagen` es opcional; si se omite, la campaña se crea sin imagen de portada. La creación responde `201` con `{ msg, campana, disponibilidad }`.
 
 Después de crear la campaña, cada punto se puede agregar mediante `POST /api/campanas/:campaignId/puntos` como JSON. La respuesta `201` contiene `{ campanaId, punto, totalPuntos }`.

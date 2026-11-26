@@ -798,6 +798,28 @@ const normalizePickupPoints = (
     const secondaryIds = rawSecondaryIds.map((collector) =>
       String(collector?._id ?? collector)
     );
+    const rawRequiredCollectorCount = Object.hasOwn(item, "recolectoresRequeridos")
+      ? item.recolectoresRequeridos
+      : existing?.recolectoresRequeridos;
+    const requiredCollectorCount = rawRequiredCollectorCount === undefined
+      || rawRequiredCollectorCount === null
+      || rawRequiredCollectorCount === ""
+      ? null
+      : Number(rawRequiredCollectorCount);
+    if (
+      requiredCollectorCount !== null
+      && (
+        !Number.isInteger(requiredCollectorCount)
+        || requiredCollectorCount < 1
+        || requiredCollectorCount > MAX_RECOLECTORES_POR_PUNTO
+      )
+    ) {
+      const error = new Error(
+        `La cantidad requerida por punto debe ser un entero entre 1 y ${MAX_RECOLECTORES_POR_PUNTO}`
+      );
+      error.statusCode = 400;
+      throw error;
+    }
     if (
       (requirePrincipalForNewOrConfigured && (!existing || hasCollectorConfiguration))
       && !principalId
@@ -824,6 +846,22 @@ const normalizePickupPoints = (
       );
       error.statusCode = 409;
       throw error;
+    }
+    if (requiredCollectorCount !== null) {
+      const assignedCollectorCount = new Set([
+        ...(principalId ? [principalId] : []),
+        ...secondaryIds,
+      ]).size;
+      if (assignedCollectorCount < requiredCollectorCount) {
+        const missingCollectors = requiredCollectorCount - assignedCollectorCount;
+        const error = new Error(
+          missingCollectors === 1
+            ? "Falta 1 recolector para completar el punto"
+            : `Faltan ${missingCollectors} recolectores para completar el punto`
+        );
+        error.statusCode = 409;
+        throw error;
+      }
     }
     if (principalId && secondaryIds.length + 1 > MAX_RECOLECTORES_POR_PUNTO) {
       const error = new Error("Un punto no puede tener más de 3 recolectores en total");
@@ -985,6 +1023,7 @@ const normalizePickupPoints = (
       latitud,
       longitud,
       activo: active,
+      recolectoresRequeridos: requiredCollectorCount,
       recolectores: principalId
         ? [principalId, ...secondaryIds].map((id) => new mongoose.Types.ObjectId(id))
         : existing?.recolectores || [],
@@ -2080,6 +2119,7 @@ const listarDistribucionRecolectores = async (req, res) => {
             latitude: point.latitud ?? null,
             longitude: point.longitud ?? null,
             activo: true,
+            recolectoresRequeridos: point.recolectoresRequeridos ?? null,
             horariosAtencion: point.horariosAtencion || [],
             responsableRecolector: principal
               ? {
@@ -2189,6 +2229,7 @@ const listarDistribucionRecolectores = async (req, res) => {
           nombre: point.nombre,
           direccion: point.direccion,
           activo: point.activo,
+          recolectoresRequeridos: point.recolectoresRequeridos ?? null,
           horariosAtencion: point.horariosAtencion || [],
           recolectores,
           responsableRecolector:
