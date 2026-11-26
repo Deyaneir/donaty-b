@@ -165,6 +165,12 @@ const normalizeCampaignDays = (value) => {
   return days;
 };
 
+const toValidObjectIdStrings = (values = []) => [...new Set(
+  (values || [])
+    .map((value) => String(value?._id ?? value ?? ""))
+    .filter((value) => value && mongoose.isValidObjectId(value))
+)];
+
 const listAvailableCollectorsForCampaign = async (campaign) => {
   const eligibleCollectors = await Recolector.find({
     confirmEmail: true,
@@ -175,13 +181,13 @@ const listAvailableCollectorsForCampaign = async (campaign) => {
     .lean();
   if (!eligibleCollectors.length) return [];
 
-  const reservationCampaignIds = [...new Set(
+  const reservationCampaignIds = toValidObjectIdStrings(
     eligibleCollectors.flatMap((collector) =>
       (collector.reservasHorarioCampanas || []).map((reservation) =>
-        String(reservation.campana)
+        reservation.campana
       )
     )
-  )];
+  );
   const reservationCampaigns = reservationCampaignIds.length
     ? await Campana.find({ _id: { $in: reservationCampaignIds } })
         .select("_id estado activa puntosRecoleccion")
@@ -197,16 +203,18 @@ const listAvailableCollectorsForCampaign = async (campaign) => {
   }));
 
   const collectorIds = collectorsWithCurrentReservations.map((collector) => collector._id);
-  const legacyCampaignIds = collectorsWithCurrentReservations
-    .filter((collector) =>
-      collector.campanaReservada
-      && String(collector.campanaReservada) !== String(campaign._id)
-      && !(collector.reservasHorarioCampanas || []).some(
-        (reservation) =>
-          String(reservation.campana) === String(collector.campanaReservada)
+  const legacyCampaignIds = toValidObjectIdStrings(
+    collectorsWithCurrentReservations
+      .filter((collector) =>
+        collector.campanaReservada
+        && String(collector.campanaReservada) !== String(campaign._id)
+        && !(collector.reservasHorarioCampanas || []).some(
+          (reservation) =>
+            String(reservation.campana) === String(collector.campanaReservada)
+        )
       )
-    )
-    .map((collector) => collector.campanaReservada);
+      .map((collector) => collector.campanaReservada)
+  );
   const assignedCampaigns = await Campana.find({
     _id: { $ne: campaign._id },
     activa: true,
@@ -2150,12 +2158,12 @@ const listarDistribucionRecolectores = async (req, res) => {
     const currentCollectorIds = [...new Set(
       currentAssignments.map((assignment) => assignment.collectorId)
     )];
-    const collectorIds = [...new Set([
+    const collectorIds = toValidObjectIdStrings([
       ...currentCollectorIds,
       ...(campaign.historialAsignacionesRecolectores || []).map((entry) =>
-        String(entry.recolector?._id ?? entry.recolector)
+        entry.recolector?._id ?? entry.recolector
       ),
-    ])];
+    ]);
     const [collectors, activeCollectors] = await Promise.all([
       Recolector.find({ _id: { $in: collectorIds } })
         .select("nombre apellido email telefono direccion status aprobado confirmEmail")
