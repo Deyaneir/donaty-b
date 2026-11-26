@@ -24,6 +24,7 @@ import { buildCurrentCollectorCampaignFilter } from "../utils/collectorHistory.j
 import { listDonatedCampaignIds } from "../utils/donorCampaignHistory.js";
 import {
   isCampaignAvailableNow,
+  isCampaignDateFinished,
   isCampaignDateRangeValid,
   isCampaignScheduleFinished,
   normalizeCampaignDate,
@@ -230,7 +231,7 @@ const resolveCampaignState = (campaign, now = new Date()) => {
   if (storedState === "borrador") return "borrador";
   if (
     (campaign?.activa === true || storedState === "desactivada")
-    && isCampaignScheduleFinished(campaign, now)
+    && isCampaignDateFinished(campaign, now)
   ) {
     return "finalizada";
   }
@@ -1203,13 +1204,6 @@ const listarCampanas = async (req, res) => {
         select: "nombre activa",
       })
       .sort({ createdAt: -1 });
-    if (rol !== "admin") {
-      const now = new Date();
-      campanas = campanas.filter((campaign) =>
-        isCampaignAvailableNow(campaign, now)
-        || (rol === "donante" && donatedCampaignIdSet.has(String(campaign._id)))
-      );
-    }
 
     const campaignIds = campanas.map((campaign) => campaign._id);
     const deliveryReadinessByCampaign = new Map(

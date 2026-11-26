@@ -119,7 +119,7 @@ const isCampaignAvailableNow = (campaign, now = new Date()) => {
   return true;
 };
 
-const isCampaignScheduleFinished = (campaign, now = new Date()) => {
+const isCampaignDateFinished = (campaign, now = new Date()) => {
   const state = String(campaign?.estado ?? "").toLowerCase();
   if (state === "finalizada") return true;
   if (state === "borrador") return false;
@@ -127,7 +127,17 @@ const isCampaignScheduleFinished = (campaign, now = new Date()) => {
   if (!endDate) return false;
 
   const current = getEcuadorDateTime(now);
-  if (current.dateKey > endDate) return true;
+  return current.dateKey > endDate;
+};
+
+const isCampaignScheduleFinished = (campaign, now = new Date()) => {
+  if (isCampaignDateFinished(campaign, now)) return true;
+  const state = String(campaign?.estado ?? "").toLowerCase();
+  if (state === "finalizada" || state === "borrador") return false;
+  const endDate = getCampaignDateKey(campaign?.fechaFin);
+  if (!endDate) return false;
+
+  const current = getEcuadorDateTime(now);
   if (current.dateKey < endDate) return false;
 
   const endTime = parseCampaignTime(campaign?.horaFin);
@@ -140,6 +150,7 @@ export {
   getEcuadorDateBounds,
   getEcuadorDateTime,
   isCampaignAvailableNow,
+  isCampaignDateFinished,
   isCampaignDateRangeValid,
   isCampaignScheduleFinished,
   normalizeCampaignDate,
